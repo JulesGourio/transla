@@ -1099,7 +1099,7 @@ async def retranslate_segment(job_id: int, seg_id: str, request: Request):
         await conn.execute(
             '''
             UPDATE translation_segments
-            SET translated_text = $3, keep_as_is = FALSE, conflict_flag = FALSE,
+            SET translated_text = $3, keep_as_is = FALSE, conflict_flag = FALSE, conflict_detail = NULL,
                 detected_lang = $4, lang_confidence = NULL
             WHERE job_id = $1 AND seg_id = $2
             ''',
@@ -1200,7 +1200,7 @@ async def update_segment_translation(job_id: int, seg_id: str, body: SegmentTran
         result = await conn.execute(
             '''
             UPDATE translation_segments
-            SET translated_text = $3, keep_as_is = FALSE, conflict_flag = FALSE,
+            SET translated_text = $3, keep_as_is = FALSE, conflict_flag = FALSE, conflict_detail = NULL,
                 detected_lang = $4, lang_confidence = NULL
             WHERE job_id = $1 AND seg_id = $2
             ''',
@@ -1613,7 +1613,9 @@ async def _run_translation_stage(job_id: int, source_lang: str, target_lang: str
             failed_seg_ids = [seg_id for seg_id, plan in plans.items() if plan['query'] in failed]
             async with pool.acquire() as conn:
                 await conn.execute(
-                    'UPDATE translation_segments SET conflict_flag = TRUE, keep_as_is = TRUE WHERE id = ANY($1::bigint[])',
+                    'UPDATE translation_segments SET conflict_flag = TRUE, keep_as_is = TRUE, '
+                    "conflict_detail = COALESCE(conflict_detail, 'Translation failed after all retries — use the translate button') "
+                    'WHERE id = ANY($1::bigint[])',
                     failed_seg_ids,
                 )
 
@@ -2095,6 +2097,21 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                 quality_flag_reasons[f['seg_id']] = (
                     quality_flag_reasons.get(f['seg_id'], '') and quality_flag_reasons[f['seg_id']] + '; '
                 ) + 'Translation may not fit its box (text overflow)'
+        # These flags describe THIS rebuild's output: one left by an earlier
+        # rebuild kept showing "Still reads as BG" on a segment fixed since.
+        async with pool.acquire() as conn:
+            cleared = {
+                r['seg_id'] for r in await conn.fetch(
+                    '''
+                    UPDATE translation_segments SET conflict_flag = FALSE, conflict_detail = NULL
+                    WHERE job_id = $1 AND (conflict_detail LIKE 'Still reads as %'
+                                           OR conflict_detail LIKE 'Translation may not fit its box%')
+                    RETURNING seg_id
+                    ''',
+                    job_id,
+                )
+            }
+        seg_rows = [{**dict(r), 'conflict_flag': False} if r['seg_id'] in cleared else r for r in seg_rows]
         if quality_flag_reasons:
             async with pool.acquire() as conn:
                 async with conn.transaction():
