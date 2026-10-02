@@ -684,6 +684,42 @@ def test_apply_translations_lxml_uniform_for_composed_full_text():
     assert joined == 'Serrez la vis Tighten the screw'
 
 
+def _para(inner):
+    from lxml import etree
+    return etree.fromstring(f'<w:p xmlns:w="{_W}">{inner}</w:p>'.encode())
+
+
+def _seq(p):
+    out = []
+    for el in p.iter():
+        tag = el.tag.split('}')[-1]
+        if tag == 't' and el.text:
+            out.append(el.text)
+        elif tag in ('tab', 'br'):
+            out.append(f'<{tag}{":" + el.get(f"{{{_W}}}type") if el.get(f"{{{_W}}}type") else ""}>')
+    return out
+
+
+def test_replace_uniform_keeps_breaks_and_tabs_in_place():
+    p = _para('<w:r><w:t>Étape 1</w:t><w:tab/><w:t>Serrer</w:t><w:br/><w:t>la vis</w:t></w:r>')
+    assert _rebuild.replace_uniform(p, 'Step 1\tTighten\nthe screw')
+    assert _seq(p) == ['Step 1', '<tab>', 'Tighten', '<br>', 'the screw']
+
+
+def test_replace_uniform_fills_slot_without_text_element():
+    p = _para('<w:r><w:br w:type="page"/></w:r><w:r><w:t>Titre</w:t></w:r>')
+    assert _rebuild.replace_uniform(p, 'Lead\nTitle')
+    assert _seq(p) == ['Lead', '<br:page>', 'Title']
+
+
+def test_replace_uniform_restructures_when_llm_changes_breaks():
+    p = _para('<w:r><w:t>Un</w:t><w:br/><w:t>deux</w:t></w:r><w:r><w:br w:type="page"/><w:t>trois</w:t></w:r>')
+    assert _rebuild.replace_uniform(p, 'One two\nthree')
+    # one break reused in sequence, the unused page break stays in place
+    assert _seq(p) == ['One two', '<br>', 'three', '<br:page>']
+    assert '\n' not in ''.join(t.text or '' for t in p.iter(f'{{{_W}}}t'))
+
+
 # ---------------------------------------------------------------------------
 # soffice exact-PDF engine
 # ---------------------------------------------------------------------------

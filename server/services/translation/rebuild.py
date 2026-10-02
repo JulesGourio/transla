@@ -250,29 +250,95 @@ def get_t_elements(run: ET.Element) -> list[ET.Element]:
     return [t for t in run if t.tag == W + "t"]
 
 
+def _set_t(t, text: str) -> None:
+    t.text = text
+    if text != text.strip():
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def _new_t(ref, text: str):
+    t = ref.makeelement(W + "t", {})
+    _set_t(t, text)
+    return t
+
+
+_SEP_TAGS = {W + "tab": "\t", W + "br": "\n"}
+
+
+def _write_runs_text(runs: list, new_text: str) -> bool:
+    """Write new_text into runs, honouring its \\t/\\n as the runs' own
+    <w:tab/>/<w:br/> (extract.py reads them as those characters). Dumping it
+    all into the first <w:t> left a literal \\n/\\t there AND every original
+    break/tab bunched after it — a blank line per break, doubled tabs, i.e.
+    extra pages on a translation no longer than its source."""
+    items = []  # (run, elem, kind) in document order; kind 't', '\t' or '\n'
+    for r in runs:
+        for c in r:
+            if c.tag == W + "t":
+                items.append((r, c, "t"))
+            elif c.tag in _SEP_TAGS:
+                items.append((r, c, _SEP_TAGS[c.tag]))
+    if not any(k == "t" for _, _, k in items):
+        return False
+    parts = re.split(r"([\t\n])", new_text)
+    texts, new_seps = parts[0::2], parts[1::2]
+    old_seps = [(r, c, k) for r, c, k in items if k != "t"]
+
+    if [k for _, _, k in old_seps] == new_seps:
+        # Same breaks/tabs in the same order: each text piece goes into the
+        # slot between the original separators.
+        slots: list[list] = [[] for _ in texts]
+        i = 0
+        for _, c, k in items:
+            if k == "t":
+                slots[i].append(c)
+            else:
+                i += 1
+        for i, text in enumerate(texts):
+            if slots[i]:
+                _set_t(slots[i][0], text)
+                for t in slots[i][1:]:
+                    t.text = ""
+            elif text:
+                if i < len(old_seps):
+                    r, sep, _ = old_seps[i]
+                    r.insert(list(r).index(sep), _new_t(sep, text))
+                else:
+                    r, sep, _ = old_seps[i - 1]
+                    r.insert(list(r).index(sep) + 1, _new_t(sep, text))
+        return True
+
+    # Different structure (the LLM merged/split lines): rebuild the sequence
+    # in the first text run, reusing original separators of the same kind
+    # in order (keeps a page break's w:type); unused ones stay where they are.
+    first_r, first_t = next((r, c) for r, c, k in items if k == "t")
+    pools = {"\t": [(r, c) for r, c, k in old_seps if k == "\t"],
+             "\n": [(r, c) for r, c, k in old_seps if k == "\n"]}
+    for r, c, k in items:
+        if k == "t" and c is not first_t:
+            r.remove(c)
+    _set_t(first_t, texts[0])
+    anchor = first_t
+    for sep, text in zip(new_seps, texts[1:]):
+        if pools[sep]:
+            r, el = pools[sep].pop(0)
+            r.remove(el)
+        else:
+            el = first_t.makeelement(W + ("tab" if sep == "\t" else "br"), {})
+        new = [el, _new_t(first_t, text)] if text else [el]
+        for e in new:
+            first_r.insert(list(first_r).index(anchor) + 1, e)
+            anchor = e
+    return True
+
+
 def replace_uniform(p: ET.Element, new_text: str) -> bool:
-    """Strategy: put all text in the first <w:t>, blank the rest. Used when
-    all runs share the same formatting (~80-90% of segments)."""
+    """Strategy: write the whole text over all runs (see _write_runs_text).
+    Used when all runs share the same formatting (~80-90% of segments)."""
     runs = get_runs(p)
     if not runs:
         return False
-    first_t = None
-    extra_ts = []
-    for r in runs:
-        for t in get_t_elements(r):
-            if first_t is None:
-                first_t = t
-            else:
-                extra_ts.append(t)
-    if first_t is None:
-        return False
-    first_t.text = new_text
-    # Preserve whitespace by setting xml:space if necessary
-    if new_text != new_text.strip():
-        first_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    for t in extra_ts:
-        t.text = ""
-    return True
+    return _write_runs_text(runs, new_text)
 
 
 def replace_bilingual_format_split(p: ET.Element, new_text: str,
@@ -286,19 +352,8 @@ def replace_bilingual_format_split(p: ET.Element, new_text: str,
     runs = get_runs(p)
     if not runs:
         return False
-    matching_ts = []
-    for r in runs:
-        rPr = r.find(W + "rPr")
-        if _fmt_hash(rPr) == primary_fmt:
-            matching_ts.extend(get_t_elements(r))
-    if not matching_ts:
-        return False
-    matching_ts[0].text = new_text
-    if new_text != new_text.strip():
-        matching_ts[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    for t in matching_ts[1:]:
-        t.text = ""
-    return True
+    matching = [r for r in runs if _fmt_hash(r.find(W + "rPr")) == primary_fmt]
+    return _write_runs_text(matching, new_text)
 
 
 def replace_slash_split(p: ET.Element, new_left: str,
