@@ -39,6 +39,7 @@ from ..services.processors.translation import (
     rebuild_docx_bytes,
     validate_docx,
 )
+from ..services import storage as _storage
 from ..services.soffice import SofficeUnavailable, convert_docx_to_pdf, soffice_status
 from ..services.llm import call_llm_json, cost_eur
 from ..services.translation.audit import determine_mode as _determine_mode
@@ -500,15 +501,9 @@ async def _insert_questions(job_id: int, questions: List[Dict[str, Any]]) -> Non
 # ---------------------------------------------------------------------------
 
 async def _upload_input_to_volume(job_id: int, docx_bytes: bytes, filename: str) -> None:
-    volume_path = os.getenv('TRANSLATE_VOLUME_PATH', '').rstrip('/')
-    if not volume_path:
-        return
-    dest_dir = f'{volume_path}/{job_id}'
-    dest = f'{dest_dir}/input_{_sanitize_filename(filename)}'
+    dest = f'{_storage.job_root()}/{job_id}/input_{_sanitize_filename(filename)}'
     try:
-        w = WorkspaceClient()
-        await asyncio.to_thread(w.files.create_directory, dest_dir)
-        await asyncio.to_thread(w.files.upload, dest, io.BytesIO(docx_bytes), overwrite=True)
+        await asyncio.to_thread(_storage.upload, dest, docx_bytes)
         await _update_job(job_id, input_volume_path=dest)
     except Exception as e:
         logger.warning('translate job %s: background volume upload failed: %s', job_id, e)
@@ -1710,10 +1705,7 @@ async def start_translation(job_id: int, request: Request):
 
 
 async def _download_from_volume(path: str) -> bytes:
-    w = WorkspaceClient()
-    resp = await asyncio.to_thread(w.files.download, path)
-    content = resp.contents
-    return content.read() if hasattr(content, 'read') else bytes(content)
+    return await asyncio.to_thread(_storage.download, path)
 
 
 def _preview_pdf_paths(output_volume_path: str) -> tuple[str, str]:
@@ -1747,9 +1739,8 @@ async def _generate_preview_pdfs(
         return
     before_path, after_path = _preview_pdf_paths(output_volume_path)
     try:
-        w = WorkspaceClient()
-        await asyncio.to_thread(w.files.upload, before_path, io.BytesIO(before_pdf), overwrite=True)
-        await asyncio.to_thread(w.files.upload, after_path, io.BytesIO(after_pdf), overwrite=True)
+        await asyncio.to_thread(_storage.upload, before_path, before_pdf)
+        await asyncio.to_thread(_storage.upload, after_path, after_pdf)
         logger.info('translate job %s: preview PDFs persisted to volume', job_id)
     except Exception as e:
         logger.warning('translate job %s: preview PDF volume upload failed: %s', job_id, e)
@@ -1883,7 +1874,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
         if not job or not job['input_volume_path']:
             raise RuntimeError(
                 'Original document not available for rebuild (no input_volume_path — '
-                'TRANSLATE_VOLUME_PATH may not be configured)'
+                'the input upload to storage failed)'
             )
 
         async with pool.acquire() as conn:
@@ -2047,16 +2038,12 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             # Loop again: refetch seg_rows (now carrying the re-translated
             # text) and redo fit_check → rebuild → validate on top of it.
 
-        output_path = None
-        volume_path = os.getenv('TRANSLATE_VOLUME_PATH', '').rstrip('/')
-        if volume_path:
-            output_path = f'{volume_path}/{job_id}/output.docx'
-            try:
-                w = WorkspaceClient()
-                await asyncio.to_thread(w.files.upload, output_path, io.BytesIO(rebuilt_bytes), overwrite=True)
-            except Exception as e:
-                logger.warning('translate job %s: failed to upload output to volume: %s', job_id, e)
-                output_path = None
+        output_path = f'{_storage.job_root()}/{job_id}/output.docx'
+        try:
+            await asyncio.to_thread(_storage.upload, output_path, rebuilt_bytes)
+        except Exception as e:
+            logger.warning('translate job %s: failed to upload output to volume: %s', job_id, e)
+            output_path = None
 
         # Residual-source-language and fit_check CRITICAL segments were only
         # ever surfaced via stage_progress (the job status page's "Review &
@@ -2243,7 +2230,7 @@ async def get_translation_preview(job_id: int, request: Request, format: str = '
         return JSONResponse({'error': 'Not found'}, status_code=404)
     if not job['input_volume_path'] or not job['output_volume_path']:
         return JSONResponse(
-            {'error': 'Preview not available yet (job not rebuilt, or TRANSLATE_VOLUME_PATH not configured)'},
+            {'error': 'Preview not available yet (job not rebuilt, or output storage failed)'},
             status_code=409,
         )
 
@@ -2344,8 +2331,7 @@ async def get_translation_preview_pdf(job_id: int, request: Request, side: str =
         logger.error('translate job %s: preview.pdf %s failed: %s', job_id, side, e)
         return JSONResponse({'error': f'PDF conversion failed: {e}'}, status_code=502)
     try:
-        w = WorkspaceClient()
-        await asyncio.to_thread(w.files.upload, pregen_path, io.BytesIO(pdf), overwrite=True)
+        await asyncio.to_thread(_storage.upload, pregen_path, pdf)
     except Exception as e:
         logger.warning('translate job %s: preview.pdf persistence failed: %s', job_id, e)
     return Response(content=pdf, media_type='application/pdf', headers=headers)
