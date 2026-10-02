@@ -54,10 +54,33 @@ export function rectFor(pt: PageText, pos: number, len: number): { x0: number; y
   };
 }
 
+// Longest chain of anchors increasing on BOTH sides. A mis-located segment
+// (repeated text matched elsewhere) yields a crossing anchor, which made the
+// map run backwards there: scrolling down jumped the other pane up, then the
+// two panes fought each other.
+function monotoneAnchors(pts: { from: number; to: number }[]): { from: number; to: number }[] {
+  const sorted = [...pts].sort((x, y) => x.from - y.from || x.to - y.to);
+  const tails: number[] = [];
+  const prev: number[] = new Array(sorted.length).fill(-1);
+  for (let i = 0; i < sorted.length; i++) {
+    let lo = 0, hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const t = sorted[tails[mid]];
+      if (t.from < sorted[i].from && t.to < sorted[i].to) lo = mid + 1; else hi = mid;
+    }
+    prev[i] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = i;
+  }
+  const out: { from: number; to: number }[] = [];
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) out.push(sorted[i]);
+  return out.reverse();
+}
+
 // Piecewise-linear map of a continuous (page + frac) position from one side
-// to the other, through real anchors plus synthetic identity anchors at both
-// document ends (degrades to a plain page-count ratio wherever no real
-// anchor has been resolved yet).
+// to the other, through real anchors plus synthetic anchors at both document
+// ends — the end is page `total + 1` since a position on the last page runs
+// up to total + 1 (degrades to a plain length ratio without real anchors).
 export function mapPos(
   fromSide: 'before' | 'after',
   fromPos: number,
@@ -65,15 +88,12 @@ export function mapPos(
   toTotal: number,
   anchors: (PageAnchor | null)[],
 ): number {
+  const end = { from: fromTotal + 1, to: toTotal + 1 };
   const real = anchors
     .filter((x): x is PageAnchor => x !== null)
-    .map(x => (fromSide === 'before' ? { from: x.before, to: x.after } : { from: x.after, to: x.before }));
-  const pts = [{ from: 1, to: 1 }, ...real, { from: fromTotal, to: toTotal }].sort((x, y) => x.from - y.from);
-  const dedup: { from: number; to: number }[] = [];
-  for (const p of pts) {
-    if (dedup.length && dedup[dedup.length - 1].from === p.from) dedup[dedup.length - 1] = p;
-    else dedup.push(p);
-  }
+    .map(x => (fromSide === 'before' ? { from: x.before, to: x.after } : { from: x.after, to: x.before }))
+    .filter(p => p.from > 1 && p.from < end.from && p.to > 1 && p.to < end.to);
+  const dedup = [{ from: 1, to: 1 }, ...monotoneAnchors(real), end];
   let lo = dedup[0], hi = dedup[dedup.length - 1];
   for (let i = 0; i < dedup.length - 1; i++) {
     if (fromPos >= dedup[i].from && fromPos <= dedup[i + 1].from) { lo = dedup[i]; hi = dedup[i + 1]; break; }

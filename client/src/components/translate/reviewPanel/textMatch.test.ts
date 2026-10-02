@@ -74,10 +74,10 @@ describe('rectFor', () => {
 });
 
 describe('mapPos', () => {
-  it('interpolates between the synthetic (1,1) and (total,total) endpoints when there are no real anchors', () => {
+  it('interpolates between the synthetic (1,1) and (total+1,total+1) endpoints when there are no real anchors', () => {
     expect(mapPos('before', 1, 10, 20, [])).toBeCloseTo(1, 5);
-    expect(mapPos('before', 10, 10, 20, [])).toBeCloseTo(20, 5);
-    expect(mapPos('before', 5.5, 10, 20, [])).toBeCloseTo(10.5, 5); // midpoint (t=0.5)
+    expect(mapPos('before', 11, 10, 20, [])).toBeCloseTo(21, 5);
+    expect(mapPos('before', 6, 10, 20, [])).toBeCloseTo(11, 5); // midpoint (t=0.5)
   });
 
   it('is the identity map when both documents have the same page count', () => {
@@ -88,9 +88,22 @@ describe('mapPos', () => {
     const anchors: (PageAnchor | null)[] = [{ before: 4, after: 6 }];
     // Below the anchor: interpolate between (1,1) and (4,6).
     expect(mapPos('before', 4, 10, 15, anchors)).toBeCloseTo(6, 5);
-    // Above the anchor: interpolate between (4,6) and (10,15).
-    expect(mapPos('before', 10, 10, 15, anchors)).toBeCloseTo(15, 5);
-    expect(mapPos('before', 7, 10, 15, anchors)).toBeCloseTo(10.5, 5);
+    // Above the anchor: interpolate between (4,6) and (11,16).
+    expect(mapPos('before', 11, 10, 15, anchors)).toBeCloseTo(16, 5);
+    expect(mapPos('before', 7.5, 10, 15, anchors)).toBeCloseTo(11, 5);
+  });
+
+  it('never runs backwards: drops an anchor crossing the others', () => {
+    const anchors: (PageAnchor | null)[] = [
+      { before: 3, after: 3 }, { before: 5, after: 2 }, { before: 6, after: 7 }, { before: 8, after: 9 },
+    ];
+    let last = -Infinity;
+    for (let p = 1; p <= 11; p += 0.25) {
+      const m = mapPos('before', p, 10, 12, anchors);
+      expect(m).toBeGreaterThanOrEqual(last);
+      last = m;
+    }
+    expect(mapPos('before', 6, 10, 12, anchors)).toBeCloseTo(7, 5);
   });
 
   it('maps in the reverse direction using the anchor\'s other side', () => {

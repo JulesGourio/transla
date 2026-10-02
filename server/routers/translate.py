@@ -100,6 +100,12 @@ Rules:
 - Return ONLY a JSON object of the exact shape {{"translations": {{"<id>": "<translated string>", ...}}}} \
 — one entry per input id, no extra prose, no markdown fence."""
 
+# The same prompt again mostly echoes the same untranslated output — the
+# residual re-pass has to say why these strings are back.
+_RETRY_PROMPT_SUFFIX = """IMPORTANT: a previous pass returned these strings still in {source_name}. \
+Every {source_name} word must now be translated into {target_name}; only part numbers, codes, \
+standards references and proper nouns may stay unchanged."""
+
 
 def _sanitize_filename(filename: str, fallback: str = 'document') -> str:
     base = os.path.basename((filename or '').strip())
@@ -316,6 +322,7 @@ async def _translate_batch(
     source_lang: str, target_lang: str, glossary_rows: List[Dict[str, str]], job_id: int,
     job_semaphore: Optional[asyncio.Semaphore] = None,
     resolved_memory: Optional[Dict[str, str]] = None,
+    retry: bool = False,
 ) -> Dict[str, str]:
     """Translate one batch. Items are keyed by numeric id — requiring the LLM
     to echo the exact source string as a JSON key (previous design) broke on
@@ -323,6 +330,8 @@ async def _translate_batch(
     source_name = _LANG_NAMES.get(source_lang, source_lang.upper())
     target_name = _LANG_NAMES.get(target_lang, target_lang.upper())
     system_prompt = _TRANSLATE_SYSTEM_PROMPT.format(source_name=source_name, target_name=target_name)
+    if retry:
+        system_prompt += '\n\n' + _RETRY_PROMPT_SUFFIX.format(source_name=source_name, target_name=target_name)
     glossary_context = _build_glossary_context(glossary_rows, source_lang, target_lang, batch_strings=strings)
     if glossary_context:
         system_prompt += f'\n\nGlossary ({source_lang}->{target_lang}):\n{glossary_context}'
@@ -356,6 +365,7 @@ async def _translate_unique_strings(
     source_lang: str, target_lang: str, glossary_rows: List[Dict[str, str]], job_id: int,
     on_resolved: Optional[Callable[[Dict[str, str]], Awaitable[None]]] = None,
     progress_offset: int = 0, progress_total: Optional[int] = None,
+    retry: bool = False,
 ) -> tuple[Dict[str, str], List[str]]:
     """Batch-translate unique strings, retrying failed batches individually.
 
@@ -391,7 +401,7 @@ async def _translate_unique_strings(
             try:
                 result = await _translate_batch(
                     host, token, endpoint, batch, source_lang, target_lang, glossary_rows, job_id,
-                    job_semaphore, resolved_memory=resolved_memory,
+                    job_semaphore, resolved_memory=resolved_memory, retry=retry,
                 )
                 missing = [s for s in batch if s not in result]
                 for s in batch:
@@ -420,7 +430,7 @@ async def _translate_unique_strings(
                 try:
                     result = await _translate_batch(
                         host, token, endpoint, [s], source_lang, target_lang, glossary_rows, job_id,
-                        job_semaphore, resolved_memory=resolved_memory,
+                        job_semaphore, resolved_memory=resolved_memory, retry=retry,
                     )
                     if s in result:
                         translations[s] = result[s]
@@ -442,6 +452,8 @@ async def _translate_unique_strings(
         await finished
         done_count = sum(1 for t in tasks if t.done())
         translated_so_far = progress_offset + min(done_count * _TRANSLATE_BATCH_SIZE, len(unique_strings))
+        if retry:
+            continue  # runs inside the rebuild stage: don't flip the job status back to 'translating'
         await _update_job(
             job_id, status='translating',
             stage_progress={'stage': 'translating', 'done': min(translated_so_far, total), 'total': total},
@@ -1904,8 +1916,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             async with pool.acquire() as conn:
                 seg_rows = await conn.fetch(
                     '''
-                    SELECT seg_id, part, location_type, xml_choice_path, xml_fallback_path, pattern_type,
-                           inline_split, source_text, translated_text, keep_as_is,
+                    SELECT id, seg_id, part, location_type, xml_choice_path, xml_fallback_path, pattern_type,
+                           inline_split, source_text, translated_text, keep_as_is, dnt_tokens,
                            detected_lang, conflict_flag, conflict_detail, out_of_page_range
                     FROM translation_segments WHERE job_id = $1
                     ''',
@@ -1994,7 +2006,18 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             # A reviewer-dismissed segment (e.g. a proper noun the check keeps
             # flagging) never counts against this job again — neither for the
             # auto-retry pass below nor for the warning list shown after.
-            residual_items = [it for it in residual_items if it['seg_id'] not in dismissed_seg_ids]
+            # DNT / numeric-only / out-of-page-range segments stay in the source
+            # language by design — flagging them made every page-filtered job
+            # report its whole untouched range, and the re-pass below then
+            # translated those pages anyway.
+            seg_row_by_id = {r['seg_id']: r for r in seg_rows}
+            residual_items = [
+                it for it in residual_items
+                if it['seg_id'] not in dismissed_seg_ids
+                and not (it['seg_id'] in seg_row_by_id and (
+                    seg_row_by_id[it['seg_id']]['out_of_page_range']
+                    or seg_row_by_id[it['seg_id']]['pattern_type'] in ('dnt', 'numeric_only')))
+            ]
 
             if not structural_ok or already_retried or not residual_items:
                 break
@@ -2004,37 +2027,49 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             if not (endpoint and host and token):
                 break  # can't retry without LLM credentials — surface as-is
 
-            residual_seg_ids = list(dict.fromkeys(it['seg_id'] for it in residual_items))
-            seg_row_by_id = {r['seg_id']: r for r in seg_rows}
-            unique_strings = list(dict.fromkeys(
-                seg_row_by_id[sid]['source_text'] for sid in residual_seg_ids
-                if sid in seg_row_by_id and seg_row_by_id[sid]['source_text']
-            ))
+            # Re-plan through _plan_segment_translation (forcing the source
+            # language, which is what the residual check just established) so a
+            # bilingual-inline segment re-sends only its source side: sending the
+            # whole source_text translated the kept side too, and for format
+            # splits got the full text spliced into the span's runs.
+            retry_plans: Dict[str, Dict[str, Any]] = {}
+            for it in residual_items:
+                r = seg_row_by_id.get(it['seg_id'])
+                if not r or not r['source_text'] or it['seg_id'] in retry_plans:
+                    continue
+                row = dict(r)
+                try:
+                    row['inline_split'] = json.loads(r['inline_split']) if r['inline_split'] else None
+                except (TypeError, json.JSONDecodeError):
+                    row['inline_split'] = None
+                row.update(detected_lang=source_lang, lang_confidence=None)
+                plan = _plan_segment_translation(row, source_lang, job['target_lang'], 'monolingual')
+                if plan:
+                    retry_plans[it['seg_id']] = {'row': row, 'plan': plan}
+            unique_strings = list(dict.fromkeys(p['plan']['query'] for p in retry_plans.values()))
             if not unique_strings:
                 break
             already_retried = True
             logger.info('translate job %s: %d segment(s) still read as %s — running one automatic re-translation pass',
-                        job_id, len(residual_seg_ids), source_lang.upper())
+                        job_id, len(retry_plans), source_lang.upper())
             glossary_rows = await _get_glossary_rows()
             retried, _ = await _translate_unique_strings(
                 host, token, endpoint, unique_strings, source_lang, job['target_lang'], glossary_rows, job_id,
+                retry=True,
             )
             if not retried:
                 break
+            by_source: Dict[str, Dict[str, List[int]]] = {}
             async with pool.acquire() as conn:
-                for sid in residual_seg_ids:
-                    src = seg_row_by_id.get(sid, {}).get('source_text')
-                    new_text = retried.get(src) if src else None
-                    if not new_text or new_text == src:
-                        continue
-                    await conn.execute(
-                        '''
-                        UPDATE translation_segments
-                        SET translated_text = $3, keep_as_is = FALSE
-                        WHERE job_id = $1 AND seg_id = $2
-                        ''',
-                        job_id, sid, new_text,
-                    )
+                async with conn.transaction():
+                    for sid, p in retry_plans.items():
+                        new_span = retried.get(p['plan']['query'])
+                        if not new_span or new_span == p['plan']['query']:
+                            continue
+                        await _apply_resolved_segment(conn, p['row'], p['plan'], new_span, by_source, source_lang)
+                        await conn.execute(
+                            'UPDATE translation_segments SET keep_as_is = FALSE WHERE id = $1', p['row']['id'],
+                        )
             # Loop again: refetch seg_rows (now carrying the re-translated
             # text) and redo fit_check → rebuild → validate on top of it.
 

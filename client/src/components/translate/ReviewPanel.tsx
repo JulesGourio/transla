@@ -48,6 +48,12 @@ interface Segment {
 
 interface LocateHit { rect: RectFrac; page: number; pos: number }
 
+// Exact vertical position of both hits, or no anchor at all: a page-count
+// guess standing in for an unlocated side used to be fed to linked scroll as
+// if it were real, and drifted further with every page the translation added.
+const anchorOf = (rb: LocateHit | null, ra: LocateHit | null): PageAnchor | null =>
+  rb && ra ? { before: rb.page + rb.rect.y0, after: ra.page + ra.rect.y0 } : null;
+
 async function loadPdf(url: string): Promise<pdfjsLib.PDFDocumentProxy> {
   const res = await fetch(url);
   if (!res.ok) {
@@ -100,7 +106,8 @@ export function ReviewPanel({
   const pdfBefore = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const pdfAfter = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const linkedRef = useRef(true);
-  const suppressSync = useRef(false);
+  // pane the user last scrolled by hand; null while goTo() smooth-scrolls both
+  const driverRef = useRef<HTMLElement | null>(null);
   // cached page text (with per-item positions) for locating a segment on a page
   const textCache = useRef<{ before: Map<number, PageText>; after: Map<number, PageText> }>({ before: new Map(), after: new Map() });
   // last matched (page, concat-position) per pane, used to keep forward
@@ -231,25 +238,47 @@ export function ReviewPanel({
     if (loading) return;
     const b = beforeCol.current, a = afterCol.current;
     if (!b || !a) return;
-    let lock = false;
 
+    // Only the pane the user is actually moving drives the other one. The old
+    // rAF lock let the follower's own (delayed) scroll event sync back to the
+    // leader — wherever the map isn't exactly invertible (a clamped end, an
+    // extra page) the two panes then pulled each other until they froze.
+    let hovered: HTMLElement | null = null;
     const sync = (from: HTMLElement, to: HTMLElement, fromSide: 'before' | 'after') => {
-      if (lock || suppressSync.current || !linkedRef.current) return;
-      lock = true;
+      if (driverRef.current !== from || !linkedRef.current) return;
       const { page, frac } = pageOfScroll(from, from.scrollTop);
       const fromTotal = (fromSide === 'before' ? pdfBefore.current?.numPages : pdfAfter.current?.numPages) ?? 1;
       const toTotal = (fromSide === 'before' ? pdfAfter.current?.numPages : pdfBefore.current?.numPages) ?? 1;
       const mapped = mapPos(fromSide, page + frac, fromTotal, toTotal, pageAnchors.current);
-      const targetPage = Math.max(1, Math.floor(mapped));
+      const targetPage = Math.min(toTotal, Math.max(1, Math.floor(mapped)));
       const targetFrac = Math.min(1, Math.max(0, mapped - targetPage));
       to.scrollTop = scrollForPageFrac(to, targetPage, targetFrac);
-      requestAnimationFrame(() => { lock = false; });
     };
     const onB = () => sync(b, a, 'before');
     const onA = () => sync(a, b, 'after');
+    const cleanups: (() => void)[] = [];
+    for (const col of [b, a]) {
+      const take = () => { driverRef.current = col; };
+      const enter = () => { hovered = col; };
+      for (const ev of ['wheel', 'pointerdown', 'touchstart'] as const) {
+        col.addEventListener(ev, take, { passive: true });
+        cleanups.push(() => col.removeEventListener(ev, take));
+      }
+      col.addEventListener('pointerenter', enter);
+      cleanups.push(() => col.removeEventListener('pointerenter', enter));
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (hovered && ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) driverRef.current = hovered;
+    };
+    window.addEventListener('keydown', onKey);
     b.addEventListener('scroll', onB, { passive: true });
     a.addEventListener('scroll', onA, { passive: true });
-    return () => { b.removeEventListener('scroll', onB); a.removeEventListener('scroll', onA); };
+    return () => {
+      b.removeEventListener('scroll', onB);
+      a.removeEventListener('scroll', onA);
+      window.removeEventListener('keydown', onKey);
+      cleanups.forEach(c => c());
+    };
   }, [loading]);
 
   const toggleLinked = useCallback(() => {
@@ -420,7 +449,7 @@ export function ReviewPanel({
     const seg = diffs[k];
     const expB = Math.max(1, Math.round(((k + 0.5) / diffs.length) * (pdfBefore.current?.numPages ?? 1)));
     const expA = Math.max(1, Math.round(((k + 0.5) / diffs.length) * (pdfAfter.current?.numPages ?? 1)));
-    suppressSync.current = true;
+    driverRef.current = null;
     const [rb, ra] = await Promise.all([
       locate('before', seg.source_text, expB, forward ? cursorRef.current.before : null),
       locate('after', overrides[seg.seg_id] ?? seg.translated_text ?? seg.source_text, expA, forward ? cursorRef.current.after : null),
@@ -430,7 +459,7 @@ export function ReviewPanel({
       before: rb ? { page: rb.page, pos: rb.pos } : null,
       after: ra ? { page: ra.page, pos: ra.pos } : null,
     };
-    pageAnchors.current[k] = { before: rb ? rb.page : expB, after: ra ? ra.page : expA };
+    pageAnchors.current[k] = anchorOf(rb, ra);
     // Navigating always scrolls both panes to their own located rect (each pane
     // is located independently), regardless of the link toggle. If a rect can't
     // be located, fall back to scrolling near the expected page (no box).
@@ -442,7 +471,6 @@ export function ReviewPanel({
     else { placeBox('after', afterBox, afterCol, null, false); scrollToPage('after', afterCol, expA); }
     if (rb) placeBox('before', beforeBox, beforeCol, rb.rect, true);
     else { placeBox('before', beforeBox, beforeCol, null, false); scrollToPage('before', beforeCol, expB); }
-    window.setTimeout(() => { suppressSync.current = false; }, 600);
   }, [diffs, locate, overrides, placeBox, current]);
 
   // An open edit whose draft hasn't been saved would otherwise be silently
@@ -522,18 +550,24 @@ export function ReviewPanel({
     if (loading || error || diffs.length === 0) return;
     let cancelled = false;
     (async () => {
+      // Walk in reading order with a forward cursor per side, like "Next"
+      // does — without it, repeated text (a recurring label, a table value)
+      // always resolved to its first occurrence near the guessed page.
+      let curB: { page: number; pos: number } | null = null;
+      let curA: { page: number; pos: number } | null = null;
       for (let k = 0; k < diffs.length; k++) {
         if (cancelled) return;
-        if (pageAnchors.current[k]) continue;
         const seg = diffs[k];
         const expB = Math.max(1, Math.round(((k + 0.5) / diffs.length) * (pdfBefore.current?.numPages ?? 1)));
         const expA = Math.max(1, Math.round(((k + 0.5) / diffs.length) * (pdfAfter.current?.numPages ?? 1)));
-        const [rb, ra] = await Promise.all([
-          locate('before', seg.source_text, expB, null),
-          locate('after', overrides[seg.seg_id] ?? seg.translated_text ?? seg.source_text, expA, null),
+        const [rb, ra]: (LocateHit | null)[] = await Promise.all([
+          locate('before', seg.source_text, expB, curB),
+          locate('after', overrides[seg.seg_id] ?? seg.translated_text ?? seg.source_text, expA, curA),
         ]);
         if (cancelled) return;
-        pageAnchors.current[k] = { before: rb ? rb.page : expB, after: ra ? ra.page : expA };
+        if (rb) curB = { page: rb.page, pos: rb.pos };
+        if (ra) curA = { page: ra.page, pos: ra.pos };
+        if (!pageAnchors.current[k]) pageAnchors.current[k] = anchorOf(rb, ra);
       }
     })();
     return () => { cancelled = true; };
