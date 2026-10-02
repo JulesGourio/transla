@@ -1,15 +1,14 @@
 ## Independence
 
 LatLang is a fully standalone Databricks App: own FastAPI backend, own React
-frontend, own Databricks App and service principal. Both non-dev targets
-share ONE UC catalog schema (`uat_landingzone.latlang` for uat/uat-test,
-`prod_landingzone.latlang` for prod) — never shared with any other app —
-with isolation between the real and disposable-test target coming from a
-`_test`-suffixed volume (`latlang` vs `latlang_test`), not a separate
-schema. Same pattern for Lakebase: one shared Postgres project id
-(`LAKEBASE_PROJECT_ID` in `app.yaml`, an existing compute resource reused
-to avoid provisioning a new one) with this app's own dedicated,
-`_test`-suffixed database (`latlang`/`latlang_test`) inside it.
+frontend, own Databricks App and service principal, own UC schema per
+environment (`uat_proj.latlang`, `prod_proj.latlang`, `dev_proj.latlang`)
+with two volumes — `documents` (job files, app READ+WRITE) and `binaries`
+(LibreOffice archive, app READ) — plus Delta copies of the Lakebase tables
+(`resources/lakebase_copy.yml`, nightly). Lakebase: one shared Postgres
+project id (`LAKEBASE_PROJECT_ID`, reused compute) with this app's own
+database `latlang`. The former `latlang-uat-test` target and `latlang_test`
+volume no longer exist (history below still mentions them).
 
 See `client/src/components/translate/README.md` for the pipeline
 documentation (extract -> audit -> Q&A -> translate -> fit_check -> rebuild
@@ -412,25 +411,17 @@ write the commands for the user to run, and validate changes locally only.
 **Git: never open PRs** — commit and push straight to `main` (branches only
 for parallel work, merged by Claude, still no PR).
 
-**2026-10-02: the user deleted the `uat_proj.latlang` schema** (test
-documents — not important — but also the LibreOffice archive under
-`libreoffice/`). The archive was rebuilt locally (same version 25.8.7, same
-script) into the gitignored `build/libreoffice/`; re-creating the schema/
-volume and uploading it is in `OPS_COMMANDS.md` (exact commands for the
-user — keep every Databricks step there). Job files now fall back to local
-container disk when `TRANSLATE_VOLUME_PATH` is empty
-(`server/services/storage.py`, lost on app restart) instead of failing at
-rebuild. The real catalogs are `uat_proj`/`prod_proj` (see
-`databricks.yml`); older notes above saying `*_landingzone` are stale.
+**2026-10-02: `uat_proj.latlang` was deleted by the user** (test documents
+and the LibreOffice archive). Restructured into the `documents`/`binaries`
+volumes above; archive rebuilt locally into gitignored `build/libreoffice/`
+(not in git/LFS: 317 MB, reproducible, and the user's GitHub LFS quota is
+already exceeded — see `../side_project/rapport_git_lfs.md`). Job files fall
+back to local container disk when `TRANSLATE_VOLUME_PATH` is empty
+(`server/services/storage.py`). Every Databricks step for the user lives in
+`OPS_COMMANDS.md` — keep it the single place for exact commands.
 
-Bundle name: `latlang`. Targets: `dev`, `latlang-uat`, `latlang-uat-test`,
-`latlang-prod`.
+Bundle name: `latlang`. Targets: `dev`, `latlang-uat`, `latlang-prod`.
 
-- `latlang-uat-test`: disposable test target — own app, own Lakebase
-  database (`latlang_test`), own `_test`-suffixed volume, but the UC
-  catalog schema itself (`uat_landingzone.latlang`) is shared with
-  `latlang-uat` (see Independence above). Deploy/destroy freely — destroying
-  it only removes its own volume/jobs/app, never the shared schema.
 - `latlang-uat` and `-prod` deploy the real app. Never
   `bundle deploy`/`bundle destroy` on these without explicit user approval
   first, regardless of the global DEV/UAT policy in `~/.claude/CLAUDE.md`.

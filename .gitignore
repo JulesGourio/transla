@@ -13,3 +13,6 @@ client/dist/
 lakebase_backups/
 Translator/
 build/
+.serena/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

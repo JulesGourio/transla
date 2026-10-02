@@ -16,13 +16,12 @@ $ErrorActionPreference = 'Stop'
 # that's exactly how a stale test database name could leak into a real-uat
 # deploy.
 $Targets = @{
-    uat        = @{ Target = 'latlang-uat';      AppName = 'latlang';           Profile = 'UAT' }
-    prod       = @{ Target = 'latlang-prod';     AppName = 'latlang';           Profile = 'qualibot-prod' }
-    'uat-test' = @{ Target = 'latlang-uat-test'; AppName = 'latlang-uat-test';  Profile = 'UAT' }
+    uat  = @{ Target = 'latlang-uat';  AppName = 'latlang'; Profile = 'UAT' }
+    prod = @{ Target = 'latlang-prod'; AppName = 'latlang'; Profile = 'qualibot-prod' }
 }
 
 if (-not $Targets.ContainsKey($AppEnv)) {
-    Write-Host "Unknown environment '$AppEnv'. Use: uat | prod | uat-test" -ForegroundColor Red
+    Write-Host "Unknown environment '$AppEnv'. Use: uat | prod" -ForegroundColor Red
     exit 1
 }
 
@@ -84,6 +83,7 @@ try {
             --exclude 'client/node_modules/**' `
             --exclude 'Translator/**' `
             --exclude 'lakebase_backups/**' `
+            --exclude 'build/**' `
             --exclude '**/*.ipynb' `
             --exclude '.databricks/**'
         if ($LASTEXITCODE -ne 0) { throw "databricks sync failed (exit $LASTEXITCODE)" }
@@ -91,18 +91,13 @@ try {
 
     # 3. Ensure the app compute is running before deploying. Deploying to a
     # stopped app fails outright ("Cannot deploy app ... as it is not in
-    # RUNNING state"). latlang-uat-test must NEVER be auto-started by a
-    # script (disposable test app -- being stopped is its normal/intended
-    # state outside of an active manual test session). uat and prod are
-    # fine to auto-start here.
+    # RUNNING state").
     Write-Host "[3/4] Checking app compute state..." -ForegroundColor Yellow
     $appInfo = & databricks apps get $AppName --profile $Profile -o json | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { throw "databricks apps get failed (exit $LASTEXITCODE)" }
     $computeState = $appInfo.compute_status.state
     if ($computeState -in @('ACTIVE', 'STARTING')) {
         Write-Host "      $AppName compute is $computeState - no action needed." -ForegroundColor DarkGray
-    } elseif ($AppEnv -eq 'uat-test') {
-        throw "$AppName compute is $computeState. This app is never auto-started by a script - start it manually first: databricks apps start $AppName --profile $Profile"
     } else {
         Write-Host "      $AppName compute is $computeState - starting it (waits until active)..." -ForegroundColor Yellow
         & databricks apps start $AppName --profile $Profile

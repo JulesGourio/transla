@@ -14,11 +14,10 @@ Steps (all pure Python, runs fine on Windows):
   4. re-tar with normalized exec permissions (Windows drops them otherwise)
 
 Usage:
-  python utils/soffice_packaging/package_libreoffice.py <downloaded.tar.gz> <output.tar.gz>
+  uv run --no-project --with zstandard utils/soffice_packaging/package_libreoffice.py <downloaded.tar.gz> <output.tar.gz>
 
-Then upload to the UC Volume and point the app at it:
-  databricks fs cp <output.tar.gz> dbfs:/Volumes/<catalog>/<schema>/<volume>/libreoffice/libreoffice-linux-x64.tar.gz
-  app.yaml / deploy: SOFFICE_ARCHIVE_VOLUME_PATH=/Volumes/<...>/libreoffice/libreoffice-linux-x64.tar.gz
+Upload and app config: see OPS_COMMANDS.md (archive goes to the `binaries`
+volume, path set in utils/deploy/target_env.json).
 """
 
 import gzip
@@ -199,8 +198,7 @@ def main(bundle_path: str, output_path: str) -> None:
             tar.add(lo_root, arcname=lo_root.name, filter=normalize)
 
         print(f'done: {output} ({output.stat().st_size / 1e6:.0f} MB)')
-        print('upload with:')
-        print(f'  databricks fs cp "{output}" "dbfs:/Volumes/<catalog>/<schema>/<volume>/libreoffice/{output.name}"')
+        print('upload: see OPS_COMMANDS.md')
 
 
 if __name__ == '__main__':

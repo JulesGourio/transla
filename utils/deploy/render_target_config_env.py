@@ -1,7 +1,7 @@
 """Render target_config.env from utils/deploy/target_env.json for one target.
 
 USAGE:
-    python utils/deploy/render_target_config_env.py <uat|uat-test|prod> [output_path]
+    python utils/deploy/render_target_config_env.py <uat|prod> [output_path]
 
 Single source of truth for per-target app env overrides, shared by
 deploy_latlang.ps1 -- avoids hand-editing target_config.env (and
@@ -18,7 +18,7 @@ CONFIG_PATH = Path(__file__).with_name("target_env.json")
 
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit(f"Usage: {sys.argv[0]} <uat|uat-test|prod> [output_path]")
+        raise SystemExit(f"Usage: {sys.argv[0]} <uat|prod> [output_path]")
     target = sys.argv[1]
     output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("target_config.env")
 

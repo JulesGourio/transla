@@ -8,8 +8,7 @@ env:
 
   # Lakebase — reuses an existing shared Postgres project id ("qualibot") to
   # avoid provisioning new compute, but with this app's own dedicated
-  # database: latlang is the real data, latlang_test a disposable
-  # validation copy.
+  # database (latlang).
   - name: LAKEBASE_PROJECT_ID
     value: "qualibot"
   - name: LAKEBASE_DATABASE
@@ -29,10 +28,10 @@ env:
 
   # Per-environment volume path for job input/output .docx files. Empty =
   # local container disk (server/services/storage.py), lost on app restart.
-  #   uat : /Volumes/uat_proj/latlang/latlang
-  #   prod: /Volumes/prod_proj/latlang/latlang
+  #   uat : /Volumes/uat_proj/latlang/documents
+  #   prod: /Volumes/prod_proj/latlang/documents
   - name: TRANSLATE_VOLUME_PATH
-    value: "/Volumes/uat_proj/latlang/latlang"
+    value: "/Volumes/uat_proj/latlang/documents"
 
   # Max concurrent batched-translation LLM calls per job
   - name: TRANSLATE_MAX_CONCURRENT

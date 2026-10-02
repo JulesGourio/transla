@@ -1,0 +1,62 @@
+# Lakebase (Postgres) database `latlang` -> Delta tables of the same name in
+# Unity Catalog `<catalog>.latlang`, read from one consistent snapshot, each
+# table created when missing and fully replaced otherwise (CREATE OR REPLACE,
+# Delta history kept). Notebook: utils/databricks_ops/lakebase_sync/copy_lakebase_to_uc.py
+#
+# Requirements: serverless only (classic job clusters cannot reach the
+# Lakebase private endpoint); the run_as service principal needs a Postgres
+# role on the `qualibot` project and USE SCHEMA + CREATE TABLE on the target
+# schema (see OPS_COMMANDS.md).
+
+targets:
+  latlang-uat:
+    resources:
+      jobs:
+        lakebase_copy:
+          name: "D_0_latlang-lakebase-copy-${bundle.target}"
+          description: "Copy of every table of the latlang Lakebase database into uat_proj.latlang Delta tables"
+          # Two overlapping runs would replace the same tables concurrently.
+          max_concurrent_runs: 1
+          tags:
+            project: LatLang
+            job-purpose: lakebase-copy
+          permissions:
+            - group_name: "Role-Project-LEAP-CoreAdmin"
+              level: CAN_MANAGE
+            - group_name: "Role-Project-LEAP-CoreDev"
+              level: CAN_MANAGE
+          run_as:
+            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
+          tasks:
+            - task_key: copy_lakebase_tables
+              description: "Discover the Lakebase tables, then create or replace each one in Unity Catalog"
+              timeout_seconds: 3600
+              environment_key: lakebase_copy_env
+              notebook_task:
+                notebook_path: ../utils/databricks_ops/lakebase_sync/copy_lakebase_to_uc.py
+                source: WORKSPACE
+                base_parameters:
+                  lakebase_project: "qualibot"
+                  lakebase_branch: "production"
+                  lakebase_endpoint: "primary"
+                  lakebase_instance: ""
+                  lakebase_host: ""
+                  lakebase_database: "latlang"
+                  source_schemas: ""
+                  include_tables: ""
+                  skip_tables: ""
+                  target_catalog: ${var.app_write_catalog}
+                  target_schema: ${var.app_write_schema}
+                  create_target_schema: "false"
+                  target_table_name: "{table}"
+                  fetch_batch_rows: "20000"
+          environments:
+            - environment_key: lakebase_copy_env
+              spec:
+                environment_version: "5"
+                dependencies:
+                  - psycopg2-binary>=2.9
+          schedule:
+            quartz_cron_expression: "0 0 2 * * ?"
+            timezone_id: "Europe/Paris"
+            pause_status: UNPAUSED

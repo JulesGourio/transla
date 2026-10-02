@@ -1,0 +1,8 @@
+{
+  "spec": {
+    "identity_type": "SERVICE_PRINCIPAL",
+    "postgres_role": "3e5cd4e5-f765-4760-b974-ee7715258b39",
+    "auth_method": "LAKEBASE_OAUTH_V1",
+    "membership_roles": ["DATABRICKS_SUPERUSER"]
+  }
+}

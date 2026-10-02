@@ -1,0 +1,8 @@
+{
+  "changes": [
+    {
+      "principal": "3e5cd4e5-f765-4760-b974-ee7715258b39",
+      "add": ["USE_SCHEMA", "CREATE_TABLE"]
+    }
+  ]
+}
