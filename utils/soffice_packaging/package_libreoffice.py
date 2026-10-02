@@ -54,7 +54,7 @@ _SYSLIB_PACKAGES = [
     # (pure-Python DT_NEEDED scan of the tree), minus GUI-plugin-only deps
     # (Qt5/KF5/GTK3/GStreamer — never loaded with SAL_USE_VCLPLUGIN=svp):
     'libssl3', 'libcrypt1', 'libbsd0', 'libmd0', 'libx11-xcb1', 'libffi8',
-    'libmount1', 'libblkid1', 'libselinux1', 'libpcre3', 'libuuid1',
+    'libmount1', 'libblkid1', 'libselinux1', 'libpcre3', 'libpcre2-8-0', 'libuuid1',
     'libgnutls30', 'libidn2-0', 'libunistring2', 'libtasn1-6', 'libnettle8',
     'libhogweed6', 'libp11-kit0', 'libgmp10',
     'libsystemd0', 'liblzma5', 'libzstd1', 'liblz4-1', 'libcap2',
@@ -87,7 +87,7 @@ def extract_deb(deb_bytes: bytes, dest: Path) -> None:
         elif name.endswith('.gz') or name.endswith('.tar'):
             stream = io.BytesIO(payload)
         elif name.endswith('.zst'):
-            import zstandard  # only needed if TDF ever switches to zstd
+            import zstandard  # Ubuntu jammy-updates debs are zstd: uv run --with zstandard
             stream = io.BytesIO(zstandard.ZstdDecompressor().decompress(payload, max_output_size=2**33))
         else:
             raise RuntimeError(f'unsupported data member {name}')

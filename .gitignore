@@ -12,3 +12,4 @@ client/dist/
 .pytest_cache/
 lakebase_backups/
 Translator/
+build/

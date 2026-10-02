@@ -409,14 +409,19 @@ another `latlang-uat` deploy.
 no UC/Lakebase). Never run or plan `databricks`/`bundle` commands yourself —
 write the commands for the user to run, and validate changes locally only.
 
-**2026-10-02: the user deleted the `uat_landingzone.latlang` schema** (test
+**Git: never open PRs** — commit and push straight to `main` (branches only
+for parallel work, merged by Claude, still no PR).
+
+**2026-10-02: the user deleted the `uat_proj.latlang` schema** (test
 documents — not important — but also the LibreOffice archive under
-`libreoffice/`). Until rebuilt and re-uploaded
-(`utils/soffice_packaging/package_libreoffice.py`), exact-PDF preview and the
-page-range filter report `SofficeUnavailable`. Job files now fall back to
-local container disk when `TRANSLATE_VOLUME_PATH` is empty
+`libreoffice/`). The archive was rebuilt locally (same version 25.8.7, same
+script) into the gitignored `build/libreoffice/`; re-creating the schema/
+volume and uploading it is in `OPS_COMMANDS.md` (exact commands for the
+user — keep every Databricks step there). Job files now fall back to local
+container disk when `TRANSLATE_VOLUME_PATH` is empty
 (`server/services/storage.py`, lost on app restart) instead of failing at
-rebuild.
+rebuild. The real catalogs are `uat_proj`/`prod_proj` (see
+`databricks.yml`); older notes above saying `*_landingzone` are stale.
 
 Bundle name: `latlang`. Targets: `dev`, `latlang-uat`, `latlang-uat-test`,
 `latlang-prod`.

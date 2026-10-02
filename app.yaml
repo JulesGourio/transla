@@ -29,8 +29,8 @@ env:
 
   # Per-environment volume path for job input/output .docx files. Empty =
   # local container disk (server/services/storage.py), lost on app restart.
-  #   uat : /Volumes/uat_landingzone/latlang/latlang
-  #   prod: /Volumes/prod_landingzone/latlang/latlang
+  #   uat : /Volumes/uat_proj/latlang/latlang
+  #   prod: /Volumes/prod_proj/latlang/latlang
   - name: TRANSLATE_VOLUME_PATH
     value: "/Volumes/uat_proj/latlang/latlang"
 
