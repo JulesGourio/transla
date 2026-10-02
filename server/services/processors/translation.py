@@ -7,6 +7,7 @@ adapted to run in-memory against uploaded bytes instead of CLI file paths.
 
 import io
 import logging
+import re
 import zipfile
 from typing import Any, Dict, List, Tuple
 
@@ -387,6 +388,18 @@ _RESIDUAL_UNIQUE_CHARS = {
 }
 
 
+def _reads_as_script(text: str, lo: str, hi: str) -> bool:
+    """True when the text is still made of words in this script — not merely
+    containing some of its characters. Counting characters flagged already
+    translated segments that only kept a code with a Cyrillic look-alike
+    ("М8х1,25", "ОР50") or a proper noun left as-is per the prompt's rules."""
+    words = re.findall(r'[^\W\d_]{2,}', text)
+    native = [w for w in words if len(w) >= 3 and all(lo <= c <= hi for c in w)]
+    if len(words) == 1:
+        return len(native) == 1
+    return len(native) >= 2 and len(native) * 2 >= len(words)
+
+
 def _check_residual_source_language_bytes(new_bytes: bytes, source_lang: str) -> List[Dict[str, Any]]:
     """Return the segments in the rebuilt document that still read as the
     source language — a QUALITY signal, not a hard failure. Each item is
@@ -412,12 +425,12 @@ def _check_residual_source_language_bytes(new_bytes: bytes, source_lang: str) ->
         if not text.strip() or len(text.strip()) < 3:
             continue
         if source_lang == 'bg':
-            if sum(1 for c in text if 'Ѐ' <= c <= 'ӿ') > 3:
+            if _reads_as_script(text, 'Ѐ', 'ӿ'):
                 items.append({'seg_id': s['seg_id'], 'text': text,
                               'detected_lang': 'bg', 'confidence': None})
             continue
         if source_lang == 'ar':
-            if sum(1 for c in text if '؀' <= c <= 'ۿ') > 3:
+            if _reads_as_script(text, '؀', 'ۿ'):
                 items.append({'seg_id': s['seg_id'], 'text': text,
                               'detected_lang': 'ar', 'confidence': None})
             continue

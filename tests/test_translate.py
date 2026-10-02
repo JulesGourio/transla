@@ -774,3 +774,15 @@ def test_convert_docx_to_pdf_cache_hit_needs_no_engine(monkeypatch, tmp_path):
         lambda: (_ for _ in ()).throw(AssertionError('engine must not be consulted on cache hit')),
     )
     assert soffice.convert_docx_to_pdf(docx_bytes) == pdf_bytes
+
+
+def test_residual_script_check_ignores_translated_text_with_kept_cyrillic():
+    from server.services.processors.translation import _reads_as_script
+    cyr = lambda t: _reads_as_script(t, 'Ѐ', 'ӿ')
+    # translated, only a code with Cyrillic look-alikes / a kept name remains
+    assert not cyr('Serrer la vis М8х1,25 au couple prescrit')
+    assert not cyr('Poste ОП50 — contrôle visuel de la fixation')
+    assert not cyr('Fournisseur : Латекоер България, voir annexe A')
+    # genuinely still Bulgarian
+    assert cyr('Затегнете винта')
+    assert cyr('Забележка')
