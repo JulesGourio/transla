@@ -400,34 +400,38 @@ async def _translate_unique_strings(
 
     async def _run_batch(batch: List[str]) -> None:
         applied: set[str] = set()
+        todo = batch
         for attempt in range(2):
             try:
                 result = await _translate_batch(
-                    host, token, endpoint, batch, source_lang, target_lang, glossary_rows, job_id,
+                    host, token, endpoint, todo, source_lang, target_lang, glossary_rows, job_id,
                     job_semaphore, resolved_memory=resolved_memory, retry=retry,
                 )
-                missing = [s for s in batch if s not in result]
-                for s in batch:
+                missing = [s for s in todo if s not in result]
+                for s in todo:
                     if s in result:
                         translations[s] = result[s]
                 resolved_memory.update(result)
-                new_items = {s: result[s] for s in batch if s in result and s not in applied}
+                new_items = {s: result[s] for s in todo if s in result and s not in applied}
                 if new_items:
-                    applied.update(new_items)
                     if on_resolved:
                         await on_resolved(new_items)
+                    # Only once persisted: a failed write (rolled back) must be
+                    # retried, not counted as done and left without a translation.
+                    applied.update(new_items)
                 if not missing:
                     return
+                todo = missing  # the retry pays only for what is still unresolved
                 logger.warning('translate job %s: batch attempt %d missing %d/%d strings',
                                 job_id, attempt + 1, len(missing), len(batch))
             except Exception as e:
                 logger.warning('translate job %s: batch of %d failed (attempt %d): %s',
-                                job_id, len(batch), attempt + 1, e)
+                                job_id, len(todo), attempt + 1, e)
 
         # Batch-level retries exhausted — fall back to per-string calls so one
         # bad string doesn't sink the whole batch.
         for s in batch:
-            if s in translations:
+            if s in applied:
                 continue
             for attempt in range(2):
                 try:
@@ -438,14 +442,15 @@ async def _translate_unique_strings(
                     if s in result:
                         translations[s] = result[s]
                         resolved_memory.update(result)
-                        if s not in applied and on_resolved:
-                            applied.add(s)
+                        if on_resolved:
                             await on_resolved({s: result[s]})
+                        applied.add(s)
                         break
                 except Exception as e:
                     logger.warning('translate job %s: single-string retry failed (attempt %d): %s',
                                     job_id, attempt + 1, e)
-            if s not in translations:
+            if s not in applied:
+                translations.pop(s, None)
                 failed.append(s)
 
     total = progress_total if progress_total is not None else len(unique_strings)
