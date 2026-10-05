@@ -18,6 +18,14 @@ from ..soffice import SofficeConversionError, SofficeUnavailable, convert_docx_t
 
 logger = logging.getLogger(__name__)
 
+_MAX_PAGE = 5000  # beyond any real document; "1-999999999999" used to build a set of that size
+
+# Their text is not laid out in reading order with the body: a header repeats
+# on every page, a footnote sits at the bottom of the page that cites it. The
+# forward-only cursor below mapped them all to the last body page, so a filter
+# like "1-3" left every header and footnote in the source language.
+_UNPLACEABLE_PARTS = ('header', 'footer', 'footnotes', 'endnotes', 'comments')
+
 _PROBE_LEN = 80  # short prefix is enough to locate a segment and more
                  # tolerant of minor whitespace/reflow differences than the full text
 
@@ -33,11 +41,13 @@ def parse_page_spec(spec: str) -> set[int] | None:
         token = token.strip()
         if not token:
             continue
-        if '-' in token:
-            lo, _, hi = token.partition('-')
-            pages.update(range(int(lo), int(hi) + 1))
-        else:
-            pages.add(int(token))
+        lo, sep, hi = token.partition('-')
+        first, last = int(lo), int(hi) if sep else int(lo)
+        # A reversed range ("5-3") used to come out empty and silently turn the
+        # filter off, translating (and paying for) the whole document.
+        if first < 1 or last < first or last > _MAX_PAGE:
+            raise ValueError(f'invalid page range {token!r}')
+        pages.update(range(first, last + 1))
     return pages or None
 
 
@@ -54,12 +64,16 @@ def assign_pages(segments: list[dict], docx_bytes: bytes) -> dict[str, int]:
 
     fitz = _import_fitz()
     with fitz.open(stream=pdf_bytes, filetype='pdf') as doc:
-        pages_text = [page.get_text() for page in doc]
+        # Whitespace-normalised: a probe that wraps onto two lines of the PDF
+        # contains a newline there, not the space the segment text has.
+        pages_text = [' '.join(page.get_text().split()) for page in doc]
 
     result: dict[str, int] = {}
     page_idx = 0
     for seg in segments:
-        text = (seg.get('text') or '').strip()
+        if any(name in (seg.get('part') or '').rsplit('/', 1)[-1] for name in _UNPLACEABLE_PARTS):
+            continue
+        text = ' '.join((seg.get('text') or '').split())
         if not text:
             continue
         needle = text[:_PROBE_LEN]
