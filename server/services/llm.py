@@ -7,6 +7,7 @@ Standalone implementation of just what the translate router needs
 import json
 import logging
 import os
+import asyncio
 import re
 from typing import Any, Dict, List
 
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = float(os.getenv('TRANSLATE_ENDPOINT_TIMEOUT_S', '300'))
 DEFAULT_CONNECT_TIMEOUT_S = float(os.getenv('TRANSLATE_ENDPOINT_CONNECT_TIMEOUT_S', '30'))
+
+# Waits before each retry of a transient failure (rate limit, gateway error,
+# timeout, dropped connection). Without them the caller's immediate retries all
+# hit the same 429 and a whole document came back "translation failed".
+_RETRY_DELAYS_S = (2.0, 6.0, 15.0)
+_TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
 # DBU/1M-token rates x contracted EUR/DBU (confirmed 2026-07-29 from the
 # workspace Serving Endpoints console) — kept in sync manually.
@@ -78,8 +85,26 @@ async def call_llm_json(
     skip_temperature = False
 
     async def _post(payload: Dict[str, Any]) -> httpx.Response:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            return await client.post(url, json=payload, headers=headers)
+        for attempt in range(len(_RETRY_DELAYS_S) + 1):
+            wait = _RETRY_DELAYS_S[attempt] if attempt < len(_RETRY_DELAYS_S) else None
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                if wait is None:
+                    raise
+                logger.warning('call_llm_json: %s %s — retrying in %.0fs', endpoint_name, type(e).__name__, wait)
+                await asyncio.sleep(wait)
+                continue
+            if resp.status_code not in _TRANSIENT_STATUS or wait is None:
+                return resp
+            try:
+                wait = max(wait, min(float(resp.headers.get('retry-after', 0)), 60.0))
+            except ValueError:
+                pass
+            logger.warning('call_llm_json: %s returned %s — retrying in %.0fs', endpoint_name, resp.status_code, wait)
+            await asyncio.sleep(wait)
+        raise AssertionError('unreachable')
 
     def _rejects_temperature(resp: httpx.Response) -> bool:
         # The error is nested JSON-as-a-string inside the outer error body
@@ -109,11 +134,19 @@ async def call_llm_json(
         if not choices:
             raise RuntimeError(f'{endpoint_name} returned no choices')
         content = choices[0].get('message', {}).get('content', '')
+        truncated = choices[0].get('finish_reason') == 'length'
         if isinstance(content, list):
             content = ''.join(item.get('text', '') if isinstance(item, dict) else str(item) for item in content)
         u = body.get('usage') or {}
         usage = {'input_tokens': u.get('prompt_tokens') or 0, 'output_tokens': u.get('completion_tokens') or 0}
-        return _fix_mojibake(content), usage
+        content = _fix_mojibake(content)
+        if truncated:
+            # A repair prompt cannot restore text the model never wrote.
+            try:
+                _extract_json(content)
+            except json.JSONDecodeError:
+                raise RuntimeError(f'{endpoint_name} answer cut off at max_tokens={max_tokens}')
+        return content, usage
 
     def _extract_json(text: str) -> Dict[str, Any]:
         text = text.strip()
