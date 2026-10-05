@@ -132,6 +132,26 @@ def _spawn(coro) -> 'asyncio.Task':
     return task
 
 
+_HEARTBEAT_S = 30
+
+
+async def _heartbeat_loop(job_id: int) -> None:
+    """Keep worker_heartbeat fresh while a stage runs. It was only touched at
+    stage transitions, so a long LLM batch (up to 5 min) read as 'stalled' in the
+    UI, and a second app instance's startup reconciliation could fail a job that
+    was alive on the first."""
+    while True:
+        await asyncio.sleep(_HEARTBEAT_S)
+        pool = get_pool()
+        if not pool:
+            continue
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute('UPDATE translation_jobs SET worker_heartbeat = NOW() WHERE id = $1', job_id)
+        except Exception as e:
+            logger.debug('translate job %s: heartbeat failed: %s', job_id, e)
+
+
 def _sanitize_filename(filename: str, fallback: str = 'document') -> str:
     base = os.path.basename((filename or '').strip())
     if not base:
@@ -600,6 +620,7 @@ async def _run_job(job_id: int, docx_bytes: bytes, filename: str,
     # the moment the job reaches the human-gated awaiting_answers rest state or
     # fails, so a slow reviewer never ties up a processing slot.
     async with _active_jobs_semaphore:
+        beat = _spawn(_heartbeat_loop(job_id))
         try:
             await _update_job(job_id, status='extracting')
             segments = await asyncio.to_thread(extract_docx_segments, docx_bytes)
@@ -711,6 +732,8 @@ async def _run_job(job_id: int, docx_bytes: bytes, filename: str,
         except Exception as e:
             logger.error('translate job %s failed: %s', job_id, e, exc_info=True)
             await _update_job(job_id, status='failed', error_type=type(e).__name__, error_msg=str(e)[:2000])
+        finally:
+            beat.cancel()
 
 
 # ---------------------------------------------------------------------------
@@ -1644,6 +1667,7 @@ async def _run_translation_stage(job_id: int, source_lang: str, target_lang: str
     # Held only while this stage actively runs, released on completion/failure
     # below — see _active_jobs_semaphore's definition.
     await _active_jobs_semaphore.acquire()
+    beat = _spawn(_heartbeat_loop(job_id))
     try:
         endpoint = os.getenv('TRANSLATE_ENDPOINT', os.getenv('COMPARE_ANALYSIS_ENDPOINT', ''))
         if not endpoint:
@@ -1800,6 +1824,7 @@ async def _run_translation_stage(job_id: int, source_lang: str, target_lang: str
         logger.error('translate job %s: translation stage failed: %s', job_id, e, exc_info=True)
         await _update_job(job_id, status='failed', error_type=type(e).__name__, error_msg=str(e)[:2000])
     finally:
+        beat.cancel()
         _active_jobs_semaphore.release()
 
 
@@ -2048,6 +2073,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
     # Held only while this stage actively runs, released on completion/failure
     # below — see _active_jobs_semaphore's definition.
     await _active_jobs_semaphore.acquire()
+    beat = _spawn(_heartbeat_loop(job_id))
     try:
         async with pool.acquire() as conn:
             job = await conn.fetchrow(
@@ -2360,6 +2386,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
         logger.error('translate job %s: rebuild stage failed: %s', job_id, e, exc_info=True)
         await _update_job(job_id, status='failed', error_type=type(e).__name__, error_msg=str(e)[:2000])
     finally:
+        beat.cancel()
         _active_jobs_semaphore.release()
 
 

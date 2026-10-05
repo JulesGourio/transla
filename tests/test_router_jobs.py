@@ -493,3 +493,29 @@ def test_job_list_paging_arguments_are_clamped():
         _run(T.list_translation_jobs(_request(), limit=-5, offset=-3))
         _run(T.list_translation_jobs(_request(), limit=10**6, offset=0))
     assert seen[0][1:] == (1, 0) and seen[1][1:] == (200, 0)
+
+
+# --- heartbeat ---
+
+def test_heartbeat_keeps_a_running_stage_alive_and_stops_when_cancelled():
+    pool = FakePool()
+    pool.add_job(id=1, status='translating', worker_heartbeat='2000-01-01')
+
+    async def go():
+        with patch.object(T, 'get_pool', return_value=pool), patch.object(T, '_HEARTBEAT_S', 0.01):
+            task = T._spawn(T._heartbeat_loop(1))
+            await asyncio.sleep(0.1)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    _run(go())
+    assert pool.job()['worker_heartbeat'] == '2026-10-05T00:00:00Z'
+
+
+def test_stages_cancel_their_heartbeat_when_they_end():
+    docx = build_docx(para('Premier'))
+    pool = FakePool()
+    _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0)])
+    before = len(T._background_tasks)
+    _run_rebuild(pool, docx)
+    assert len(T._background_tasks) == before
