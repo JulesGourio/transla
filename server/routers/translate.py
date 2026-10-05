@@ -1520,9 +1520,12 @@ async def _apply_resolved_segment(
     # said. Correct detected_lang here too, or the Lang column keeps
     # advertising a stale/wrong detection on an otherwise well-translated row.
     await conn.execute(
+        # A flag left by an earlier failed attempt described a state that no
+        # longer exists once the segment has a translation.
         'UPDATE translation_segments SET translated_text = $2, '
-        'conflict_flag = conflict_flag OR $3, '
-        'conflict_detail = COALESCE(conflict_detail, $5), '
+        "conflict_flag = (conflict_flag AND COALESCE(conflict_detail, '') NOT LIKE 'Translation failed%') OR $3, "
+        "conflict_detail = CASE WHEN conflict_detail LIKE 'Translation failed%' THEN $5 "
+        'ELSE COALESCE(conflict_detail, $5) END, '
         'inline_split = COALESCE($4, inline_split), '
         'detected_lang = $6, lang_confidence = NULL WHERE id = $1',
         seg_row['id'], translated, dnt_lost, plan['inline_json'], dnt_detail, source_lang,
@@ -1962,6 +1965,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             # re-upload) stay rebuildable.
             ext_by_id = {s['seg_id']: s for s in extract_segments}
             combined = []
+            missing_translation_ids: List[str] = []
             # docx_image_ocr segments (see docx_images.py) have no real XML
             # position — xml_choice_path holds {"media_filename": ...} instead
             # of a positional path — never passed to the XML-position-based
@@ -1975,6 +1979,12 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                 if r['location_type'] == 'docx_image_ocr':
                     continue
                 ext = ext_by_id.get(r['seg_id'], {})
+                # A segment planned for translation that has none (a write lost
+                # mid-stage) used to crash the whole rebuild on a None text.
+                # It keeps its source text and is flagged instead.
+                no_translation = r['translated_text'] is None and not r['keep_as_is']
+                if no_translation:
+                    missing_translation_ids.append(r['seg_id'])
                 combined.append({
                     'seg_id': r['seg_id'],
                     'part': r['part'] or ext.get('part'),
@@ -1985,8 +1995,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                     'original_text': r['source_text'],
                     # Untranslated (keep_as_is) segments rebuild to their own source
                     # text — nothing changes for them, they just get walked/rewritten.
-                    'translated_text': r['translated_text'] if not r['keep_as_is'] else r['source_text'],
-                    'keep_as_is': bool(r['keep_as_is']),
+                    'translated_text': r['source_text'] if (r['keep_as_is'] or no_translation) else r['translated_text'],
+                    'keep_as_is': bool(r['keep_as_is']) or no_translation,
                 })
 
             flagged, critical = await asyncio.to_thread(check_fit, extract_segments, combined)
@@ -2120,6 +2130,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
         # regardless of what the job status page reported. Persist both here
         # so the tab count and the status page agree.
         quality_flag_reasons: Dict[str, str] = {}
+        for sid in missing_translation_ids:
+            quality_flag_reasons[sid] = 'Translation missing — use the translate button'
         for it in residual_items:
             quality_flag_reasons[it['seg_id']] = f"Still reads as {source_lang.upper()} after translation"
         for f in flagged:
@@ -2135,7 +2147,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                     '''
                     UPDATE translation_segments SET conflict_flag = FALSE, conflict_detail = NULL
                     WHERE job_id = $1 AND (conflict_detail LIKE 'Still reads as %'
-                                           OR conflict_detail LIKE 'Translation may not fit its box%')
+                                           OR conflict_detail LIKE 'Translation may not fit its box%'
+                                           OR conflict_detail LIKE 'Translation missing%')
                     RETURNING seg_id
                     ''',
                     job_id,

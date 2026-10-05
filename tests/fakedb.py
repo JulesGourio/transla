@@ -29,7 +29,11 @@ CREATE TABLE translation_segments (
 
 
 def _sql(sql: str) -> str:
-    return re.sub(r'\$(\d+)(::\w+(\[\])?)?', r'?\1', sql)
+    return re.sub(r'\$(\d+)(::\w+(\[\])?)?', r':p\1', sql)
+
+
+def _params(args) -> dict:
+    return {f'p{i}': v for i, v in enumerate(args, 1)}
 
 
 class FakeConn:
@@ -37,17 +41,17 @@ class FakeConn:
         self._db = db
 
     async def execute(self, sql, *args):
-        cur = self._db.execute(_sql(sql), args)
+        cur = self._db.execute(_sql(sql), _params(args))
         return f'UPDATE {cur.rowcount}'
 
     async def fetch(self, sql, *args):
-        return self._db.execute(_sql(sql), args).fetchall()
+        return self._db.execute(_sql(sql), _params(args)).fetchall()
 
     async def fetchrow(self, sql, *args):
-        return self._db.execute(_sql(sql), args).fetchone()
+        return self._db.execute(_sql(sql), _params(args)).fetchone()
 
     async def fetchval(self, sql, *args):
-        row = self._db.execute(_sql(sql), args).fetchone()
+        row = self._db.execute(_sql(sql), _params(args)).fetchone()
         return row[0] if row else None
 
     @asynccontextmanager
