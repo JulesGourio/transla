@@ -182,6 +182,12 @@ def collect_direct_runs(p: ET.Element) -> tuple[str, list[dict]]:
             elif tag == W + "br":
                 runs.append({"idx": idx, "text": "\n", "fmt_hash": h})
                 idx += 1
+            elif tag == W + "noBreakHyphen":
+                # Read as nothing, "Ref<nbh>12" reached the LLM as "Ref12" (a
+                # mangled part number) and rebuild left the element behind,
+                # adding a stray hyphen after the translation.
+                runs.append({"idx": idx, "text": "\u2011", "fmt_hash": h})
+                idx += 1
     text = "".join(r["text"] for r in runs)
     return text, runs
 

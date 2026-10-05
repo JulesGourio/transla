@@ -82,3 +82,32 @@ def test_text_boxes_in_different_cells_are_never_paired_with_each_other():
                for s, lang in zip(segs, ('bg', 'en'))]
     _audit.pair_txbx_siblings(audited, _audit.Pairer())
     assert all(a['pair_id'] is None for a in audited)
+
+
+# --- characters that used to corrupt or crash the rebuild ---
+
+def _rebuilt_xml(body_xml, translation):
+    src = build_docx(body_xml)
+    segs = extract_docx_segments(src)
+    rows = [{**s, 'original_text': s['text'], 'translated_text': translation, 'keep_as_is': False,
+             'pattern_type': 'mono', 'inline_split': None} for s in segs]
+    by_part, meta = build_rebuild_inputs(rows)
+    return zipfile.ZipFile(io.BytesIO(rebuild_docx_bytes(src, by_part, meta))).read('word/document.xml').decode()
+
+
+NBH = '<w:p><w:r><w:t>Ref</w:t><w:noBreakHyphen/><w:t>12</w:t></w:r></w:p>'
+
+
+def test_a_non_breaking_hyphen_is_part_of_the_extracted_text():
+    assert [s['text'] for s in extract_docx_segments(build_docx(NBH))] == ['Ref\u201112']
+
+
+def test_a_non_breaking_hyphen_is_not_doubled_after_translation():
+    xml = _rebuilt_xml(NBH, 'Réf\u201112')
+    assert '<w:noBreakHyphen' not in xml
+    assert xml.count('\u2011') == 1 and 'Réf\u201112' in xml
+
+
+def test_control_characters_in_a_translation_do_not_crash_the_rebuild():
+    xml = _rebuilt_xml(para('Hello there'), 'Bon\x0bjour\x00 tout')
+    assert 'Bonjour tout' in xml

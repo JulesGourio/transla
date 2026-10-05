@@ -264,6 +264,10 @@ def _new_t(ref, text: str):
 
 _SEP_TAGS = {W + "tab": "\t", W + "br": "\n"}
 
+# Not allowed in XML 1.0: lxml refuses them, so one stray control character in
+# a model answer crashed the whole rebuild.
+_XML_ILLEGAL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
 
 def _write_runs_text(runs: list, new_text: str) -> bool:
     """Write new_text into runs, honouring its \\t/\\n as the runs' own
@@ -271,10 +275,14 @@ def _write_runs_text(runs: list, new_text: str) -> bool:
     all into the first <w:t> left a literal \\n/\\t there AND every original
     break/tab bunched after it — a blank line per break, doubled tabs, i.e.
     extra pages on a translation no longer than its source."""
+    new_text = _XML_ILLEGAL_RE.sub("", new_text)
     items = []  # (run, elem, kind) in document order; kind 't', '\t' or '\n'
     for r in runs:
-        for c in r:
-            if c.tag == W + "t":
+        for c in list(r):
+            if c.tag == W + "noBreakHyphen":
+                # extract.py reads it as U+2011 inside the text being rewritten.
+                r.remove(c)
+            elif c.tag == W + "t":
                 items.append((r, c, "t"))
             elif c.tag in _SEP_TAGS:
                 items.append((r, c, _SEP_TAGS[c.tag]))
