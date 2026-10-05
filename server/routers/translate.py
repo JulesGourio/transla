@@ -2949,6 +2949,18 @@ async def approve_glossary_candidate(candidate_id: int, body: GlossaryCandidateA
         langs = {l: (v if v is not None else cand[l]) for l, v in overrides.items()}
 
         async with conn.transaction():
+            # Claim first: a double-click or a second reviewer on the same
+            # candidate used to insert the term twice.
+            claimed = await conn.execute(
+                '''
+                UPDATE glossary_candidates
+                SET status = 'approved', reviewed_by = $2, reviewed_at = NOW()
+                WHERE id = $1 AND status = 'pending'
+                ''',
+                candidate_id, reviewer,
+            )
+            if claimed == 'UPDATE 0':
+                return JSONResponse({'error': 'This candidate was already reviewed'}, status_code=409)
             term_id = await generate_term_id(conn)
             await conn.execute(
                 '''
@@ -2958,14 +2970,6 @@ async def approve_glossary_candidate(candidate_id: int, body: GlossaryCandidateA
                 ''',
                 term_id, langs['en'], langs['fr'], langs['cs'], langs['bg'], langs['de'], langs['es'],
                 langs['pt'], langs['ar'], body.domain, body.notes, cand['definition'], cand['definition_source'],
-            )
-            await conn.execute(
-                '''
-                UPDATE glossary_candidates
-                SET status = 'approved', reviewed_by = $2, reviewed_at = NOW()
-                WHERE id = $1
-                ''',
-                candidate_id, reviewer,
             )
     return {'term_id': term_id}
 
@@ -3028,10 +3032,10 @@ async def reject_glossary_candidate(candidate_id: int, body: GlossaryCandidateRe
             '''
             UPDATE glossary_candidates
             SET status = 'rejected', reviewed_by = $2, reviewed_at = NOW(), reject_reason = $3
-            WHERE id = $1
+            WHERE id = $1 AND status = 'pending'
             ''',
             candidate_id, reviewer, body.reason,
         )
     if result == 'UPDATE 0':
-        return JSONResponse({'error': 'Candidate not found'}, status_code=404)
+        return JSONResponse({'error': 'Candidate not found or already reviewed'}, status_code=404)
     return {'rejected': candidate_id}

@@ -292,3 +292,26 @@ def test_an_edit_on_a_finished_job_is_stored():
     assert _edit(pool, 's', 'Salut') == {'seg_id': 's', 'translated_text': 'Salut'}
     stored = pool.segment('s')
     assert (stored['translated_text'], stored['conflict_flag'], stored['conflict_detail']) == ('Salut', 0, None)
+
+
+# --- glossary candidate review ---
+
+def _approve(pool, candidate_id=1):
+    ids = iter(['T0001', 'T0002'])
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u', 'email': 'a@b.c'})), \
+            patch.object(T, 'generate_term_id', new=lambda conn: _term_id(ids)):
+        return _run(T.approve_glossary_candidate(candidate_id, T.GlossaryCandidateApprove(), _request()))
+
+
+async def _term_id(ids):
+    return next(ids)
+
+
+def test_approving_the_same_candidate_twice_does_not_create_the_term_twice():
+    pool = FakePool()
+    pool.add_row('glossary_candidates', id=1, bg='винт', fr='vis')
+    assert _approve(pool) == {'term_id': 'T0001'}
+    again = _approve(pool)
+    assert again.status_code == 409
+    assert pool.db.execute('SELECT COUNT(*) FROM glossary_terms').fetchone()[0] == 1

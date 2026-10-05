@@ -18,6 +18,15 @@ CREATE TABLE translation_jobs (
     glossary_validated_at TEXT, share_token TEXT, selected_image_paths TEXT, page_filter TEXT
 );
 CREATE TABLE translation_feedbacks (id INTEGER PRIMARY KEY, job_id INTEGER, vote TEXT, comment TEXT, created_at TEXT);
+CREATE TABLE glossary_candidates (
+    id INTEGER PRIMARY KEY, en TEXT, fr TEXT, cs TEXT, bg TEXT, de TEXT, es TEXT, pt TEXT, ar TEXT,
+    definition TEXT, definition_source TEXT, status TEXT DEFAULT 'pending', reviewed_by TEXT,
+    reviewed_at TEXT, reject_reason TEXT
+);
+CREATE TABLE glossary_terms (
+    id INTEGER PRIMARY KEY, term_id TEXT UNIQUE, en TEXT, fr TEXT, cs TEXT, bg TEXT, de TEXT, es TEXT,
+    pt TEXT, ar TEXT, domain TEXT, notes TEXT, definition TEXT, definition_source TEXT
+);
 CREATE TABLE translation_segments (
     id INTEGER PRIMARY KEY, job_id INTEGER, seg_id TEXT, part TEXT, location_type TEXT,
     xml_choice_path TEXT, xml_fallback_path TEXT, source_text TEXT, detected_lang TEXT,
@@ -75,6 +84,10 @@ class FakePool:
         cols = ', '.join(fields)
         self.db.execute(f'INSERT INTO translation_jobs ({cols}) VALUES ({", ".join("?" * len(fields))})',
                         tuple(fields.values()))
+
+    def add_row(self, table, **fields):
+        cols = ', '.join(fields)
+        self.db.execute(f'INSERT INTO {table} ({cols}) VALUES ({", ".join("?" * len(fields))})', tuple(fields.values()))
 
     def add_segment(self, **fields):
         cols = ', '.join(fields)
