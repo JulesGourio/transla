@@ -192,7 +192,7 @@ def _retranslate(pool, seg_id, reply):
 
 def test_retranslating_a_slash_segment_sends_only_the_source_side_and_keeps_the_other():
     pool = FakePool()
-    pool.add_job(id=1, user_id='u', source_lang='bg', target_lang='fr')
+    pool.add_job(id=1, user_id='u', status='done', source_lang='bg', target_lang='fr')
     pool.add_segment(job_id=1, seg_id='s', source_text='Здравей / Hello', pattern_type='bilingual_inline_slash',
                      inline_split=json.dumps({'kind': 'slash', 'offset': 8, 'left_lang': 'bg', 'right_lang': 'en'}),
                      translated_text='Bonjour / Hello', conflict_flag=1, conflict_detail='x')
@@ -204,7 +204,7 @@ def test_retranslating_a_slash_segment_sends_only_the_source_side_and_keeps_the_
 
 def test_retranslating_a_format_split_stores_only_the_translated_span():
     pool = FakePool()
-    pool.add_job(id=1, user_id='u', source_lang='bg', target_lang='fr')
+    pool.add_job(id=1, user_id='u', status='done', source_lang='bg', target_lang='fr')
     split = {'kind': 'format', 'fmt_a': 'b', 'fmt_b': 'i', 'lang_a': 'bg', 'lang_b': 'en',
              'text_a': 'Здравей', 'text_b': 'Hello'}
     pool.add_segment(job_id=1, seg_id='s', source_text='ЗдравейHello', pattern_type='bilingual_inline_concat',
@@ -218,7 +218,7 @@ def test_retranslating_a_format_split_stores_only_the_translated_span():
 
 def test_retranslating_a_plain_segment_still_sends_its_whole_text():
     pool = FakePool()
-    pool.add_job(id=1, user_id='u', source_lang='bg', target_lang='fr')
+    pool.add_job(id=1, user_id='u', status='done', source_lang='bg', target_lang='fr')
     pool.add_segment(job_id=1, seg_id='s', source_text='Здравей свят', pattern_type='mono')
     resp, sent = _retranslate(pool, 's', 'Bonjour le monde')
     assert sent == ['Здравей свят'] and resp['translated_text'] == 'Bonjour le monde'
@@ -258,3 +258,37 @@ def test_a_zip_bomb_is_refused_before_anything_reads_it():
     with patch.object(T, 'MAX_UNZIPPED_BYTES', 1024 * 1024):
         with pytest.raises(ValueError, match='too large once unzipped'):
             T._validate_file(_upload('a.docx'), buf.getvalue())
+
+
+# --- manual edits ---
+
+def _edit(pool, seg_id, text):
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})):
+        return _run(T.update_segment_translation(1, seg_id, T.SegmentTranslationIn(translated_text=text), _request()))
+
+
+def test_a_blank_translation_is_refused_instead_of_emptying_the_paragraph():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='done', source_lang='bg')
+    pool.add_segment(job_id=1, seg_id='s', source_text='Здравей', translated_text='Bonjour')
+    assert _edit(pool, 's', '   ').status_code == 422
+    assert pool.segment('s')['translated_text'] == 'Bonjour'
+
+
+def test_an_edit_during_a_running_stage_is_refused_not_silently_overwritten():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='translating', source_lang='bg')
+    pool.add_segment(job_id=1, seg_id='s', source_text='Здравей')
+    assert _edit(pool, 's', 'Bonjour').status_code == 409
+    assert pool.segment('s')['translated_text'] is None
+
+
+def test_an_edit_on_a_finished_job_is_stored():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='done_with_warnings', source_lang='bg')
+    pool.add_segment(job_id=1, seg_id='s', source_text='Здравей', translated_text='Bonjour', conflict_flag=1,
+                     conflict_detail='Still reads as BG after translation')
+    assert _edit(pool, 's', 'Salut') == {'seg_id': 's', 'translated_text': 'Salut'}
+    stored = pool.segment('s')
+    assert (stored['translated_text'], stored['conflict_flag'], stored['conflict_detail']) == ('Salut', 0, None)

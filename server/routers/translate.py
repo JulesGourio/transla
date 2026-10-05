@@ -1110,11 +1110,13 @@ async def retranslate_segment(job_id: int, seg_id: str, request: Request):
     identity = await get_user_identity(request)
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            'SELECT source_lang, target_lang FROM translation_jobs WHERE id = $1 AND user_id = $2',
+            'SELECT source_lang, target_lang, status FROM translation_jobs WHERE id = $1 AND user_id = $2',
             job_id, identity['user_id'],
         )
         if not job:
             return JSONResponse({'error': 'Not found'}, status_code=404)
+        if job['status'] in ACTIVE_PROCESSING_STATUSES:
+            return JSONResponse({'error': 'The job is still running — retry once it has finished'}, status_code=409)
         seg = await conn.fetchrow(
             'SELECT source_text, pattern_type, inline_split FROM translation_segments '
             'WHERE job_id = $1 AND seg_id = $2',
@@ -1259,13 +1261,22 @@ async def update_segment_translation(job_id: int, seg_id: str, body: SegmentTran
     pool = get_pool()
     if not pool:
         return JSONResponse({'error': 'Translation history not available'}, status_code=503)
+    if not body.translated_text.strip():
+        # An empty paragraph in the document, with the segment shown as
+        # human-confirmed: almost certainly a slip, never a translation.
+        return JSONResponse({'error': 'The translation cannot be empty'}, status_code=422)
     identity = await get_user_identity(request)
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            'SELECT source_lang FROM translation_jobs WHERE id = $1 AND user_id = $2', job_id, identity['user_id'],
+            'SELECT source_lang, status FROM translation_jobs WHERE id = $1 AND user_id = $2',
+            job_id, identity['user_id'],
         )
         if not job:
             return JSONResponse({'error': 'Not found'}, status_code=404)
+        if job['status'] in ACTIVE_PROCESSING_STATUSES:
+            # The running stage rewrites translated_text / reads the rows once:
+            # an edit made now is overwritten or misses this build.
+            return JSONResponse({'error': 'The job is still running — edit once it has finished'}, status_code=409)
         result = await conn.execute(
             '''
             UPDATE translation_segments
