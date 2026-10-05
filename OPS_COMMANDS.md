@@ -108,3 +108,44 @@ Si l'app existe encore : `databricks apps delete latlang-uat-test --profile UAT`
 La base Lakebase `latlang_test` contient le glossaire et les règles DNT historiques
 (la base `latlang` est partie vide). Ne pas la supprimer avant de décider s'il faut
 copier ces données dans `latlang`.
+
+## Déployer et vérifier la branche `audit/translation` (audit du 2026-10-05)
+
+Rien n'a été déployé ni testé contre Databricks. Après relecture (`docs/translation_audit_2026-10.md`)
+et fusion dans `main`, déployer le code seul : aucun changement de schéma, de ressource ni de
+client, donc ni `-Infra` ni reconstruction du frontend.
+
+```powershell
+Remove-Item Env:DATABRICKS_TOKEN -ErrorAction SilentlyContinue
+.\utils\deploy\deploy_latlang.ps1 -AppEnv uat -SkipBuild
+databricks apps logs latlang --profile UAT | Select-String -Pattern "Traceback|ERROR" -Context 0,3
+```
+
+Variables d'environnement facultatives (valeurs par défaut sûres, à ne poser dans `app.yaml` que
+pour les changer) : `TRANSLATE_BATCH_MAX_CHARS` (6000), `MAX_TRANSLATE_UNZIPPED_MB` (800).
+
+### Vérifications à faire à la main après le déploiement
+
+1. Envoyer un `.docx` contenant un formulaire (contrôle de contenu dans une cellule) et une zone
+   de texte ancienne : leur texte doit apparaître dans le panneau Segments et être traduit.
+2. Envoyer un fichier `.doc` renommé en `.docx` : message immédiat « not a valid .docx », pas de job.
+3. Traduire, ouvrir la preview, modifier un segment, « Rebuild again » : la preview doit montrer la
+   modification sans attendre dix minutes ni recharger plusieurs fois.
+4. Filtre de pages : `5-3` doit répondre « pages must look like… » ; `1-3` doit traduire aussi les
+   en-têtes et pieds de page.
+5. Première exécution sur Postgres des requêtes modifiées (`_update_job`, `_apply_resolved_segment`) :
+   un job complet doit aller jusqu'à `done` sans erreur dans `databricks apps logs latlang`.
+
+### Contrôler les règles DNT déjà en base
+
+Le contrôle des règles n'est appliqué qu'à l'ajout. Pour repérer une règle existante qui
+correspondrait à tout (préfixe/glob « * », regex qui accepte tout) :
+
+```powershell
+databricks postgres list-endpoints projects/qualibot/branches/production --profile UAT -o json
+# puis, avec psql ou le notebook SQL de la base `latlang` :
+#   SELECT id, pattern, match_mode FROM dnt_rules
+#   WHERE trim(both '*?[]' from pattern) = '' OR (match_mode = 'regex' AND pattern IN ('.*', '.+', '^.*$'));
+```
+
+Supprimer ensuite la règle fautive depuis le panneau Glossaire (ou `DELETE FROM dnt_rules WHERE id = <id>`).
