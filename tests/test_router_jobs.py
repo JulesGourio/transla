@@ -315,3 +315,31 @@ def test_approving_the_same_candidate_twice_does_not_create_the_term_twice():
     again = _approve(pool)
     assert again.status_code == 409
     assert pool.db.execute('SELECT COUNT(*) FROM glossary_terms').fetchone()[0] == 1
+
+
+# --- DNT rules ---
+
+from server.services.translation.glossary_io import DntMatcher, dnt_rule_problem
+
+
+@pytest.mark.parametrize('pattern,mode', [('NAS6404*', 'prefix'), ('*-FI', 'glob'), (r'[A-Z]{2}\d{4}', 'regex'),
+                                          ('LATECOERE', 'exact')])
+def test_ordinary_dnt_rules_are_accepted(pattern, mode):
+    assert dnt_rule_problem(pattern, mode) is None
+
+
+@pytest.mark.parametrize('pattern,mode', [('*', 'prefix'), ('*', 'glob'), ('', 'exact'), ('.*', 'regex'),
+                                          ('(', 'regex'), ('[A-Za-z ]+', 'regex'), ('abc', 'fuzzy')])
+def test_dnt_rules_that_swallow_the_document_or_never_work_are_refused(pattern, mode):
+    assert dnt_rule_problem(pattern, mode)
+
+
+def test_a_match_everything_rule_is_what_the_matcher_would_have_obeyed():
+    assert DntMatcher([{'pattern': '*', 'match_mode': 'prefix'}]).is_dnt('Serrer la vis')
+
+
+def test_the_endpoint_answers_422_for_a_dangerous_rule():
+    pool = FakePool()
+    with patch.object(T, 'get_pool', return_value=pool):
+        resp = _run(T.add_dnt_rule(T.DntRuleIn(pattern='*', match_mode='prefix')))
+    assert resp.status_code == 422

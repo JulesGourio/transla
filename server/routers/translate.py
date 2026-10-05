@@ -47,6 +47,7 @@ from ..services.llm import call_llm_json, cost_eur
 from ..services.translation.audit import determine_mode as _determine_mode
 from ..services.translation.comments import inject_comments
 from ..services.translation.docx_images import find_image_anchors, list_docx_images, ocr_docx_images, order_ocr_segments
+from ..services.translation.glossary_io import dnt_rule_problem
 from ..services.translation.glossary_extract import extract_job_candidates, normalize_term
 from ..services.translation import glossary_lakebase as _glossary_lakebase
 from ..services.translation.glossary_lakebase import generate_term_id
@@ -2861,6 +2862,9 @@ async def add_dnt_rule(body: DntRuleIn):
     pool = get_pool()
     if not pool:
         return JSONResponse({'error': 'Translation history not available'}, status_code=503)
+    problem = dnt_rule_problem(body.pattern, body.match_mode)
+    if problem:
+        return JSONResponse({'error': problem}, status_code=422)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             'INSERT INTO dnt_rules (pattern, type, match_mode, notes) VALUES ($1, $2, $3, $4) RETURNING id',

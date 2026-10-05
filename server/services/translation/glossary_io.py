@@ -125,6 +125,31 @@ def merge_terms(term_pairs: list[dict], source_lang: str,
 # Pattern-based DNT
 # ---------------------------------------------------------------------------
 
+DNT_MATCH_MODES = ("exact", "prefix", "glob", "regex")
+
+
+def dnt_rule_problem(pattern: str, match_mode: str) -> str | None:
+    """Why a DNT rule must not be saved, or None when it is fine. A rule that
+    matches every segment (prefix "*", glob "*", regex ".*") silently leaves the
+    whole document untranslated for everyone, and an invalid regex is skipped by
+    DntMatcher without a word — the reviewer believes a rule is active that is not."""
+    pattern = (pattern or "").strip()
+    if not pattern:
+        return "The pattern cannot be empty"
+    if match_mode not in DNT_MATCH_MODES:
+        return f"match_mode must be one of {', '.join(DNT_MATCH_MODES)}"
+    if match_mode in ("prefix", "glob") and not pattern.strip("*?[]"):
+        return "A pattern made only of wildcards would match every segment"
+    if match_mode == "regex":
+        try:
+            compiled = re.compile(pattern)
+        except re.error as e:
+            return f"Invalid regular expression: {e}"
+        if compiled.fullmatch("") or compiled.fullmatch("Do not translate this ordinary sentence"):
+            return "This expression would match ordinary text, not just codes"
+    return None
+
+
 class DntMatcher:
     """Compiled matcher for pattern-based DNT rules."""
 
