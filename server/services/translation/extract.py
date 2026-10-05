@@ -257,15 +257,71 @@ def extract_paragraph_direct(p: ET.Element, *, part: str, body_p_idx: int,
     )]
 
 
+def _inside_alternate_content(elem: ET.Element, host: ET.Element, parent_map: dict) -> bool:
+    cur = parent_map.get(id(elem))
+    while cur is not None and cur is not host:
+        if cur.tag == MC + "AlternateContent":
+            return True
+        cur = parent_map.get(id(cur))
+    return False
+
+
+def _txbx_segments(txbx: ET.Element, fb_txbx: ET.Element | None, *, part: str,
+                   body_p_idx: int, tag: str, root: ET.Element,
+                   parent_map: dict, txbx_path_base: dict) -> list[dict]:
+    """One segment per <w:p> of a text box, plus the cells of any table in it.
+    fb_txbx is the matching mc:Fallback copy (None for a box with no twin)."""
+    segments = []
+    container = "/".join(f"{t.rsplit('}', 1)[-1]}:{i}"
+                         for t, i in positional_path(txbx, root, parent_map))
+    fb_paras = fb_txbx.findall(W + "p") if fb_txbx is not None else []
+    for p_idx, txp in enumerate(txbx.findall(W + "p")):
+        text, runs = collect_direct_runs(txp)
+        if not text.strip():
+            continue
+        fb_path = None
+        if p_idx < len(fb_paras):
+            fb_path = positional_path(fb_paras[p_idx], root, parent_map)
+        segments.append(make_segment(
+            seg_id=f"{part}#txbx.bp{body_p_idx}.{tag}#p{p_idx}",
+            part=part,
+            location_type="txbx",
+            body_p_idx=body_p_idx,
+            # `container` is the text box's own XML position: the other fields
+            # repeat from one table cell/content control to the next.
+            txbx_path={**txbx_path_base, "para_idx": p_idx, "container": container},
+            para_idx_in_container=p_idx,
+            text=text, runs=runs,
+            xml_choice_path=positional_path(txp, root, parent_map),
+            xml_fallback_path=fb_path,
+        ))
+    for t_idx, tbl in enumerate(txbx.findall(W + "tbl")):
+        table_segs = extract_table(
+            tbl, part=part, body_p_idx=f"{body_p_idx}.{tag}.t{t_idx}",
+            root=root, parent_map=parent_map,
+        )
+        if fb_txbx is not None:
+            ch_prefix = positional_path(txbx, root, parent_map)
+            fb_prefix = positional_path(fb_txbx, root, parent_map)
+            for seg in table_segs:
+                # The Fallback copy mirrors the Choice one, so the same
+                # relative position inside the box points at its twin.
+                seg["xml_fallback_path"] = fb_prefix + seg["xml_choice_path"][len(ch_prefix):]
+        segments.extend(table_segs)
+    return segments
+
+
 def extract_drawings_in(host: ET.Element, *, part: str, body_p_idx: int,
                         root: ET.Element, parent_map: dict) -> list[dict]:
-    """Find every <mc:AlternateContent> directly within `host` (a <w:p> or
-    table cell) and extract text from its text boxes.
+    """Find every text box under `host` (a <w:p> or table cell) and extract
+    its text.
 
-    For each AlternateContent we descend into mc:Choice, locate every
+    For each <mc:AlternateContent> we descend into mc:Choice, locate every
     <w:txbxContent>, and emit one segment per <w:p> inside. The matching
     paragraph in mc:Fallback (same ordinal) is recorded via xml_fallback_path
-    so rebuild can update both copies.
+    so rebuild can update both copies. A text box outside any AlternateContent
+    (legacy VML <w:pict>, a bare <w:drawing>) has no twin and is extracted on
+    its own — it used to be skipped, leaving its text silently untranslated.
     """
     segments = []
     # Use iter() to find AlternateContent at any depth under host (not just
@@ -282,31 +338,19 @@ def extract_drawings_in(host: ET.Element, *, part: str, body_p_idx: int,
 
         for tx_idx, txbx in enumerate(choice_txbxes):
             fb_txbx = fallback_txbxes[tx_idx] if tx_idx < len(fallback_txbxes) else None
-            ch_paras = txbx.findall(W + "p")
-            fb_paras = fb_txbx.findall(W + "p") if fb_txbx is not None else []
-            for p_idx, txp in enumerate(ch_paras):
-                text, runs = collect_direct_runs(txp)
-                if not text.strip():
-                    continue
-                fb_path = None
-                if p_idx < len(fb_paras):
-                    fb_path = positional_path(fb_paras[p_idx], root, parent_map)
-                segments.append(make_segment(
-                    seg_id=f"{part}#txbx.bp{body_p_idx}.ac{ac_idx}.tx{tx_idx}#p{p_idx}",
-                    part=part,
-                    location_type="txbx",
-                    body_p_idx=body_p_idx,
-                    txbx_path={
-                        "body_p_idx": body_p_idx,
-                        "ac_idx": ac_idx,
-                        "txbx_idx": tx_idx,
-                        "para_idx": p_idx,
-                    },
-                    para_idx_in_container=p_idx,
-                    text=text, runs=runs,
-                    xml_choice_path=positional_path(txp, root, parent_map),
-                    xml_fallback_path=fb_path,
-                ))
+            segments.extend(_txbx_segments(
+                txbx, fb_txbx, part=part, body_p_idx=body_p_idx,
+                tag=f"ac{ac_idx}.tx{tx_idx}", root=root, parent_map=parent_map,
+                txbx_path_base={"body_p_idx": body_p_idx, "ac_idx": ac_idx, "txbx_idx": tx_idx},
+            ))
+
+    bare = [t for t in host.iter(W + "txbxContent") if not _inside_alternate_content(t, host, parent_map)]
+    for k, txbx in enumerate(bare):
+        segments.extend(_txbx_segments(
+            txbx, None, part=part, body_p_idx=body_p_idx,
+            tag=f"v{k}", root=root, parent_map=parent_map,
+            txbx_path_base={"body_p_idx": body_p_idx, "ac_idx": f"v{k}", "txbx_idx": 0},
+        ))
     return segments
 
 
@@ -347,6 +391,13 @@ def extract_table(tbl: ET.Element, *, part: str, body_p_idx,
                     nested_id = f"{body_p_idx}.nt{row_idx}.{cell_idx}"
                     segments.extend(extract_table(
                         child, part=part, body_p_idx=nested_id,
+                        root=root, parent_map=parent_map,
+                    ))
+                elif child.tag == W + "sdt":
+                    # A content control wrapping the cell's paragraphs (form
+                    # templates): skipped before, its text stayed untranslated.
+                    segments.extend(extract_sdt(
+                        child, part=part, body_p_idx=body_p_idx,
                         root=root, parent_map=parent_map,
                     ))
     return segments
@@ -443,6 +494,20 @@ def extract_part(xml_bytes: bytes, part: str) -> list[dict]:
                         root=root, parent_map=parent_map,
                     ))
         # other tags (sectPr, etc.) carry no translatable text
+    return _make_seg_ids_unique(segments)
+
+
+def _make_seg_ids_unique(segments: list[dict]) -> list[dict]:
+    """Two segments sharing a seg_id (two tables in one content control, a
+    nested content control restarting its paragraph counter, text boxes in
+    different table cells) used to collapse into one: the DB insert kept the
+    first and silently dropped the other, which was never translated. Later
+    occurrences get a ~N suffix; ids that never collided are untouched."""
+    seen: Counter = Counter()
+    for seg in segments:
+        seen[seg["seg_id"]] += 1
+        if seen[seg["seg_id"]] > 1:
+            seg["seg_id"] = f"{seg['seg_id']}~{seen[seg['seg_id']]}"
     return segments
 
 

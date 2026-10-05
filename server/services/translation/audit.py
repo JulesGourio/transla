@@ -248,7 +248,7 @@ def pair_txbx_siblings(audited: list[dict], pairer: Pairer) -> None:
         if seg["pattern_type"] in ("dnt", "numeric_only"):
             continue
         tx = seg["_txbx_path"]
-        key = (seg["_part"], tx["body_p_idx"], tx["ac_idx"], tx["txbx_idx"])
+        key = (seg["_part"], tx.get("container"), tx["body_p_idx"], tx["ac_idx"], tx["txbx_idx"])
         groups[key].append(seg)
     for key, segs in groups.items():
         segs.sort(key=lambda s: s["_para_idx"])
