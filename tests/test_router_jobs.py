@@ -222,3 +222,39 @@ def test_retranslating_a_plain_segment_still_sends_its_whole_text():
     pool.add_segment(job_id=1, seg_id='s', source_text='Здравей свят', pattern_type='mono')
     resp, sent = _retranslate(pool, 's', 'Bonjour le monde')
     assert sent == ['Здравей свят'] and resp['translated_text'] == 'Bonjour le monde'
+
+
+# --- upload validation ---
+
+import pytest
+
+
+def _upload(name):
+    return SimpleNamespace(filename=name)
+
+
+def test_a_real_docx_passes_validation():
+    T._validate_file(_upload('a.docx'), build_docx(para('x')))
+
+
+@pytest.mark.parametrize('data', [b'D0CF11E0 old binary .doc', b'PK\x03\x04 truncated'])
+def test_a_file_that_is_not_a_zip_is_refused_on_the_spot(data):
+    with pytest.raises(ValueError, match='not a valid .docx'):
+        T._validate_file(_upload('a.docx'), data)
+
+
+def test_a_zip_without_a_word_document_is_refused():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        z.writestr('notes.txt', 'hello')
+    with pytest.raises(ValueError, match='not a Word document'):
+        T._validate_file(_upload('a.docx'), buf.getvalue())
+
+
+def test_a_zip_bomb_is_refused_before_anything_reads_it():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('word/document.xml', b'0' * (5 * 1024 * 1024))
+    with patch.object(T, 'MAX_UNZIPPED_BYTES', 1024 * 1024):
+        with pytest.raises(ValueError, match='too large once unzipped'):
+            T._validate_file(_upload('a.docx'), buf.getvalue())

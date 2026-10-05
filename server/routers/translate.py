@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import time
+import zipfile
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -59,6 +60,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_FILE_BYTES = int(os.getenv('MAX_TRANSLATE_FILE_MB', '60')) * 1024 * 1024
+# A .docx is a zip: 60 MB compressed can inflate to many GB (every part is read
+# whole into memory, several times per job).
+MAX_UNZIPPED_BYTES = int(os.getenv('MAX_TRANSLATE_UNZIPPED_MB', '800')) * 1024 * 1024
 _STALE_HEARTBEAT_S = 120  # matches the restart-reconciliation window in app.py
 
 # Statuses where a worker is (or should be) actively processing — these are the
@@ -127,6 +131,18 @@ def _validate_file(file: UploadFile, data: bytes) -> None:
         raise ValueError(f'File "{file.filename or "unknown"}" exceeds {MAX_FILE_BYTES // (1024*1024)} MB limit')
     if not (file.filename or '').lower().endswith('.docx'):
         raise ValueError('Only .docx files are supported (bilingual aerospace documents)')
+    # Checked now so the user is told on the spot, instead of a job that fails
+    # later with a raw "File is not a zip file" (password-protected files and
+    # renamed .doc files land here).
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            infos = z.infolist()
+    except zipfile.BadZipFile:
+        raise ValueError(f'"{file.filename}" is not a valid .docx (it may be corrupted, password-protected, or an old .doc renamed)')
+    if not any(i.filename == 'word/document.xml' for i in infos):
+        raise ValueError(f'"{file.filename}" is not a Word document (no word/document.xml inside)')
+    if sum(i.file_size for i in infos) > MAX_UNZIPPED_BYTES:
+        raise ValueError(f'"{file.filename}" is too large once unzipped (limit {MAX_UNZIPPED_BYTES // (1024*1024)} MB)')
 
 
 # ---------------------------------------------------------------------------
