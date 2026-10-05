@@ -40,3 +40,15 @@ def download(path: str) -> bytes:
         content = resp.contents
         return content.read() if hasattr(content, 'read') else bytes(content)
     return Path(path).read_bytes()
+
+
+def delete(path: str) -> None:
+    """Remove a file; a file that is already gone is not an error."""
+    if _is_volume(path):
+        try:
+            WorkspaceClient().files.delete(path)
+        except Exception as e:
+            if 'not found' not in str(e).lower() and 'does not exist' not in str(e).lower():
+                raise
+        return
+    Path(path).unlink(missing_ok=True)

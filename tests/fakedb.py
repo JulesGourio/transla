@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 _SCHEMA = '''
 CREATE TABLE translation_jobs (
-    id INTEGER PRIMARY KEY, user_id TEXT, status TEXT DEFAULT 'uploaded', stage_progress TEXT,
+    id INTEGER PRIMARY KEY, created_at TEXT, user_id TEXT, status TEXT DEFAULT 'uploaded', stage_progress TEXT,
     source_lang TEXT, target_lang TEXT, original_filename TEXT, input_volume_path TEXT,
     output_volume_path TEXT, segment_count INTEGER, needs_translation_count INTEGER,
     error_type TEXT, error_msg TEXT, worker_pid INTEGER, worker_heartbeat TEXT, updated_at TEXT,
@@ -17,6 +17,7 @@ CREATE TABLE translation_jobs (
     total_output_tokens INTEGER DEFAULT 0, total_cost_eur REAL DEFAULT 0, notes TEXT,
     glossary_validated_at TEXT, share_token TEXT, selected_image_paths TEXT, page_filter TEXT
 );
+CREATE TABLE translation_feedbacks (id INTEGER PRIMARY KEY, job_id INTEGER, vote TEXT, comment TEXT, created_at TEXT);
 CREATE TABLE translation_segments (
     id INTEGER PRIMARY KEY, job_id INTEGER, seg_id TEXT, part TEXT, location_type TEXT,
     xml_choice_path TEXT, xml_fallback_path TEXT, source_text TEXT, detected_lang TEXT,

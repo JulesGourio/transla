@@ -14,6 +14,7 @@ pass (server/app.py lifespan) can detect and fail jobs orphaned by a restart.
 import asyncio
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -882,6 +883,7 @@ async def restart_translation_job(job_id: int, request: Request, body: RestartIn
                 job_id, os.getpid(), json.dumps(selected_image_paths) if selected_image_paths else None,
             )
 
+    await _discard_preview_pdfs(job_id)
     asyncio.create_task(_run_job(
         job_id, docx_bytes, job['original_filename'], job['source_lang'], job['target_lang'],
         selected_image_paths, job['page_filter'],
@@ -1761,6 +1763,35 @@ def _preview_pdf_paths(output_volume_path: str) -> tuple[str, str]:
     return f'{job_dir}/preview_original.pdf', f'{job_dir}/preview_translated.pdf'
 
 
+# The previews and the shared view show output.docx: only a finished job's file
+# has passed the structural checks (a 'failed' one may be broken) and is not the
+# previous rebuild's leftover while a new one runs.
+_PREVIEWABLE_STATUSES = ('done', 'done_with_warnings')
+
+
+async def _discard_preview_pdfs(job_id: int) -> None:
+    """Delete the pregenerated previews before a rebuild/restart: until the new
+    ones are written (several seconds after 'done') the preview endpoints would
+    serve the previous build's pages next to the new document."""
+    for path in _preview_pdf_paths(f'{_storage.job_root()}/{job_id}/output.docx'):
+        try:
+            await asyncio.to_thread(_storage.delete, path)
+        except Exception as e:
+            logger.warning('translate job %s: could not delete stale preview %s: %s', job_id, path, e)
+
+
+def _revalidating_response(content: bytes, media_type: str, request: Request,
+                           extra_headers: Optional[Dict[str, str]] = None) -> Response:
+    """Always revalidated (ETag), never served from the browser's cache blindly:
+    max-age=600 kept showing the pre-rebuild PDF in the iframe for ten minutes
+    after 'Rebuild again'."""
+    etag = '"' + hashlib.sha1(content).hexdigest() + '"'
+    headers = {'Cache-Control': 'private, no-cache', 'ETag': etag, **(extra_headers or {})}
+    if request.headers.get('if-none-match') == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
 async def _generate_preview_pdfs(
     job_id: int, src_bytes: bytes, rebuilt_bytes: bytes, output_volume_path: str,
 ) -> None:
@@ -1931,6 +1962,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                 )
             }
 
+        await _discard_preview_pdfs(job_id)
         await _update_job(job_id, status='fit_checking')
         src_bytes = await _download_from_volume(job['input_volume_path'])
         extract_segments = await asyncio.to_thread(extract_docx_segments, src_bytes)
@@ -2318,12 +2350,14 @@ async def get_translation_preview(job_id: int, request: Request, format: str = '
     identity = await get_user_identity(request)
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            'SELECT input_volume_path, output_volume_path FROM translation_jobs WHERE id = $1 AND user_id = $2',
+            'SELECT input_volume_path, output_volume_path, status FROM translation_jobs '
+            'WHERE id = $1 AND user_id = $2',
             job_id, identity['user_id'],
         )
     if not job:
         return JSONResponse({'error': 'Not found'}, status_code=404)
-    if not job['input_volume_path'] or not job['output_volume_path']:
+    if (not job['input_volume_path'] or not job['output_volume_path']
+            or job['status'] not in _PREVIEWABLE_STATUSES):
         return JSONResponse(
             {'error': 'Preview not available yet (job not rebuilt, or output storage failed)'},
             status_code=409,
@@ -2400,19 +2434,20 @@ async def get_translation_preview_pdf(job_id: int, request: Request, side: str =
     identity = await get_user_identity(request)
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            'SELECT input_volume_path, output_volume_path FROM translation_jobs WHERE id = $1 AND user_id = $2',
+            'SELECT input_volume_path, output_volume_path, status FROM translation_jobs '
+            'WHERE id = $1 AND user_id = $2',
             job_id, identity['user_id'],
         )
     if not job:
         return JSONResponse({'error': 'Not found'}, status_code=404)
-    if not job['input_volume_path'] or not job['output_volume_path']:
+    if (not job['input_volume_path'] or not job['output_volume_path']
+            or job['status'] not in _PREVIEWABLE_STATUSES):
         return JSONResponse({'error': 'Preview not available yet'}, status_code=409)
 
-    headers = {'Cache-Control': 'private, max-age=600'}
     pregen_path = _preview_pdf_paths(job['output_volume_path'])[0 if side == 'before' else 1]
     try:
         pdf = await _download_from_volume(pregen_path)
-        return Response(content=pdf, media_type='application/pdf', headers=headers)
+        return _revalidating_response(pdf, 'application/pdf', request)
     except Exception:
         pass  # not pregenerated yet — convert this side on demand
 
@@ -2429,7 +2464,7 @@ async def get_translation_preview_pdf(job_id: int, request: Request, side: str =
         await asyncio.to_thread(_storage.upload, pregen_path, pdf)
     except Exception as e:
         logger.warning('translate job %s: preview.pdf persistence failed: %s', job_id, e)
-    return Response(content=pdf, media_type='application/pdf', headers=headers)
+    return _revalidating_response(pdf, 'application/pdf', request)
 
 
 async def _get_preview_pdfs(job_id: int, identity: Dict[str, Any], extra_cols: str = '') -> tuple:
@@ -2446,12 +2481,12 @@ async def _get_preview_pdfs(job_id: int, identity: Dict[str, Any], extra_cols: s
 
     async with pool.acquire() as conn:
         job = await conn.fetchrow(
-            f'SELECT output_volume_path{extra_cols} FROM translation_jobs WHERE id = $1 AND user_id = $2',
+            f'SELECT output_volume_path, status{extra_cols} FROM translation_jobs WHERE id = $1 AND user_id = $2',
             job_id, identity['user_id'],
         )
     if not job:
         return None, None, None, JSONResponse({'error': 'Not found'}, status_code=404)
-    if not job['output_volume_path']:
+    if not job['output_volume_path'] or job['status'] not in _PREVIEWABLE_STATUSES:
         return None, None, None, JSONResponse({'error': 'Preview not available yet'}, status_code=409)
 
     before_path, after_path = _preview_pdf_paths(job['output_volume_path'])
@@ -2484,8 +2519,7 @@ async def get_translation_preview_diff(job_id: int, request: Request, page: int 
         return JSONResponse(
             {'error': f'Page {page} out of range (document has {total_pages} page(s))'}, status_code=404,
         )
-    headers = {'Cache-Control': 'private, max-age=600', 'X-Total-Pages': str(total_pages)}
-    return Response(content=png, media_type='image/png', headers=headers)
+    return _revalidating_response(png, 'image/png', request, {'X-Total-Pages': str(total_pages)})
 
 
 @router.get('/translate/jobs/{job_id}/preview/changes', dependencies=[Depends(require_translate)])
@@ -2654,7 +2688,7 @@ async def get_shared_translation_job(token: str):
         )
 
     output_docx_base64 = None
-    if job['output_volume_path']:
+    if job['output_volume_path'] and job['status'] in _PREVIEWABLE_STATUSES:
         try:
             output_bytes = await _download_from_volume(job['output_volume_path'])
             output_docx_base64 = base64.b64encode(output_bytes).decode('ascii')

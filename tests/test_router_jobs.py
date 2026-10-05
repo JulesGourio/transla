@@ -110,3 +110,62 @@ def test_translating_a_segment_that_failed_before_clears_the_failure_flag():
         == ('Bonjour', 0, None)
     # an unrelated flag survives
     assert pool.segment('s2')['conflict_flag'] == 1
+
+
+# --- previews: never stale, never a failed job's file ---
+
+from types import SimpleNamespace
+
+
+def _request(**headers):
+    return SimpleNamespace(headers=headers)
+
+
+def test_preview_is_refused_for_a_job_whose_validation_failed():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='failed', input_volume_path='/in.docx', output_volume_path='/out.docx')
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'broken')):
+        for fmt in ('docx', 'pdf'):
+            resp = _run(T.get_translation_preview(1, _request(), format=fmt))
+            assert resp.status_code == 409
+        assert _run(T.get_translation_preview_pdf(1, _request(), side='after')).status_code == 409
+
+
+def test_preview_is_served_once_the_job_is_done():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='done', input_volume_path='/in.docx', output_volume_path='/out.docx')
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'docx-bytes')):
+        resp = _run(T.get_translation_preview(1, _request(), format='docx'))
+    assert set(resp) == {'before_docx_base64', 'after_docx_base64'}
+
+
+def test_shared_view_does_not_ship_the_file_of_a_failed_job():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='failed', share_token='tok', output_volume_path='/out.docx')
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'broken')):
+        shared = _run(T.get_shared_translation_job('tok'))
+    assert shared['output_docx_base64'] is None
+
+
+def test_pdf_responses_are_revalidated_not_cached_for_ten_minutes():
+    first = T._revalidating_response(b'%PDF-1', 'application/pdf', _request())
+    assert first.headers['cache-control'] == 'private, no-cache'
+    again = T._revalidating_response(b'%PDF-1', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
+    assert again.status_code == 304
+    rebuilt = T._revalidating_response(b'%PDF-2', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
+    assert rebuilt.status_code == 200 and rebuilt.body == b'%PDF-2'
+
+
+def test_rebuild_deletes_the_previous_builds_preview_pdfs_first():
+    docx = build_docx(para('Premier'))
+    pool = FakePool()
+    _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0)])
+    deleted = []
+    with patch.object(T._storage, 'delete', side_effect=deleted.append):
+        _run_rebuild(pool, docx)
+    assert deleted == ['/out/1/preview_original.pdf', '/out/1/preview_translated.pdf']
