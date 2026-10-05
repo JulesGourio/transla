@@ -38,6 +38,7 @@ from ..services.processors.translation import (
     build_rebuild_inputs,
     check_fit,
     extract_docx_segments,
+    find_unplaced_translations,
     rebuild_docx_bytes,
     validate_docx,
 )
@@ -2142,6 +2143,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
             await _update_job(job_id, status='rebuilding')
             translations_by_part, metadata = build_rebuild_inputs(combined)
             rebuilt_bytes = await asyncio.to_thread(rebuild_docx_bytes, src_bytes, translations_by_part, metadata)
+            unplaced_ids = await asyncio.to_thread(find_unplaced_translations, rebuilt_bytes, combined)
 
             comments_placed = 0
             if include_review_comments:
@@ -2265,6 +2267,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
         # regardless of what the job status page reported. Persist both here
         # so the tab count and the status page agree.
         quality_flag_reasons: Dict[str, str] = {}
+        for sid in unplaced_ids:
+            quality_flag_reasons[sid] = 'Translation could not be placed in the document'
         for sid in missing_translation_ids:
             quality_flag_reasons[sid] = 'Translation missing — use the translate button'
         for it in residual_items:
@@ -2283,7 +2287,8 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
                     UPDATE translation_segments SET conflict_flag = FALSE, conflict_detail = NULL
                     WHERE job_id = $1 AND (conflict_detail LIKE 'Still reads as %'
                                            OR conflict_detail LIKE 'Translation may not fit its box%'
-                                           OR conflict_detail LIKE 'Translation missing%')
+                                           OR conflict_detail LIKE 'Translation missing%'
+                                           OR conflict_detail LIKE 'Translation could not be placed%')
                     RETURNING seg_id
                     ''',
                     job_id,

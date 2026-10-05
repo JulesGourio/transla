@@ -449,3 +449,29 @@ def test_a_length_flag_from_the_previous_translation_is_reset_by_the_new_one():
                      conflict_detail='Translation looks incomplete (much shorter than the source)')
     seg = _apply(pool, 's', LONG, 'Serrer l\'écrou au couple de 35 Nm et vérifier le jeu sur toute la longueur du boulon')
     assert (seg['conflict_flag'], seg['conflict_detail']) == (0, None)
+
+
+# --- a translation the rebuild could not write must not pass unnoticed ---
+
+def test_a_translation_that_could_not_be_written_into_the_document_is_flagged():
+    docx = build_docx(para('Premier') + para('Second'))
+    pool = FakePool()
+    _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0), dict(translated_text='Second EN', keep_as_is=0)])
+    # a stale stored path: the walk cannot resolve it, so rebuild skips the paragraph
+    pool.db.execute("UPDATE translation_segments SET xml_choice_path = ? WHERE seg_id LIKE '%bp1#p0'",
+                    (json.dumps([['{x}body', 0], ['{x}p', 9]]),))
+    uploaded = _run_rebuild(pool, docx)
+    job = pool.job()
+    assert job['status'] == 'done_with_warnings'
+    lost = pool.segment('word/document.xml#body_direct.bp1#p0')
+    assert lost['conflict_flag'] == 1 and lost['conflict_detail'] == 'Translation could not be placed in the document'
+    assert pool.segment('word/document.xml#body_direct.bp0#p0')['conflict_flag'] == 0
+    assert sorted(_doc_texts(uploaded['/out/1/output.docx'])) == ['First', 'Second']
+
+
+def test_a_translation_that_was_written_is_not_flagged():
+    docx = build_docx(para('Premier') + para('Second'))
+    pool = FakePool()
+    _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0), dict(translated_text='Second EN', keep_as_is=0)])
+    _run_rebuild(pool, docx)
+    assert pool.job()['status'] == 'done'

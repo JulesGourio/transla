@@ -323,6 +323,31 @@ def rebuild_docx_bytes(
     return out_buf.getvalue()
 
 
+def find_unplaced_translations(rebuilt_bytes: bytes, rows: List[Dict[str, Any]]) -> List[str]:
+    """seg_ids whose translation is not what the rebuilt document now says.
+
+    rebuild applies each translation by walking a stored XML path; a path that no
+    longer resolves, or a paragraph with no <w:t> to write into, is skipped
+    silently (the 'applied n/m' log even counts it) and the paragraph stays in the
+    source language with no flag anywhere. Re-reading the output and comparing it
+    with what was meant to be written is the only check that sees this."""
+    def norm(text: str) -> str:
+        return ' '.join(_rebuild._XML_ILLEGAL_RE.sub('', text).split())
+
+    actual = {s['seg_id']: norm(s['text']) for s in extract_docx_segments(rebuilt_bytes)}
+    unplaced = []
+    for r in rows:
+        if r.get('keep_as_is') or not r.get('translated_text') or r['seg_id'] not in actual:
+            continue
+        expected = norm(r['translated_text'])
+        inline = r.get('inline_split')
+        span_only = bool(inline and inline.get('span_translated'))
+        placed = expected in actual[r['seg_id']] if span_only else expected == actual[r['seg_id']]
+        if not placed:
+            unplaced.append(r['seg_id'])
+    return unplaced
+
+
 # ---------------------------------------------------------------------------
 # validate — 8-check structural integrity suite
 # ---------------------------------------------------------------------------
