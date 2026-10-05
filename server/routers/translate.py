@@ -73,6 +73,10 @@ ACTIVE_PROCESSING_STATUSES = (
 )
 
 _TRANSLATE_BATCH_SIZE = 40
+# call_llm_json caps the answer at 8192 tokens: 40 long paragraphs in one batch
+# overran it, the JSON came back cut off, and every batch of such a document
+# failed twice before falling back to one call per string.
+_TRANSLATE_BATCH_MAX_CHARS = int(os.getenv('TRANSLATE_BATCH_MAX_CHARS', '6000'))
 _translate_semaphore = asyncio.Semaphore(int(os.getenv('TRANSLATE_MAX_CONCURRENT', '3')))
 # A single job's batches must not monopolize the whole _translate_semaphore
 # pool while another job's batches queue behind it — this caps any one job's
@@ -363,6 +367,23 @@ async def _translate_batch(
     return out
 
 
+def _make_batches(strings: List[str]) -> List[List[str]]:
+    """Consecutive groups of at most _TRANSLATE_BATCH_SIZE strings and
+    _TRANSLATE_BATCH_MAX_CHARS characters (a single longer string travels alone)."""
+    batches: List[List[str]] = []
+    current: List[str] = []
+    chars = 0
+    for s in strings:
+        if current and (len(current) >= _TRANSLATE_BATCH_SIZE or chars + len(s) > _TRANSLATE_BATCH_MAX_CHARS):
+            batches.append(current)
+            current, chars = [], 0
+        current.append(s)
+        chars += len(s)
+    if current:
+        batches.append(current)
+    return batches
+
+
 async def _translate_unique_strings(
     host: str, token: str, endpoint: str, unique_strings: List[str],
     source_lang: str, target_lang: str, glossary_rows: List[Dict[str, str]], job_id: int,
@@ -393,10 +414,7 @@ async def _translate_unique_strings(
     # _translate_batch) — keeps one large job from starving another job's
     # batches queued behind the same global cap.
     job_semaphore = asyncio.Semaphore(min(_TRANSLATE_MAX_CONCURRENT_PER_JOB, int(os.getenv('TRANSLATE_MAX_CONCURRENT', '3'))))
-    batches = [
-        unique_strings[i:i + _TRANSLATE_BATCH_SIZE]
-        for i in range(0, len(unique_strings), _TRANSLATE_BATCH_SIZE)
-    ]
+    batches = _make_batches(unique_strings)
 
     async def _run_batch(batch: List[str]) -> None:
         applied: set[str] = set()
@@ -454,12 +472,16 @@ async def _translate_unique_strings(
                 failed.append(s)
 
     total = progress_total if progress_total is not None else len(unique_strings)
-    tasks = [asyncio.create_task(_run_batch(b)) for b in batches]
-    done_count = 0
+    done_strings = 0
+
+    async def _run_and_count(batch: List[str]) -> int:
+        await _run_batch(batch)
+        return len(batch)
+
+    tasks = [asyncio.create_task(_run_and_count(b)) for b in batches]
     for finished in asyncio.as_completed(tasks):
-        await finished
-        done_count = sum(1 for t in tasks if t.done())
-        translated_so_far = progress_offset + min(done_count * _TRANSLATE_BATCH_SIZE, len(unique_strings))
+        done_strings += await finished
+        translated_so_far = progress_offset + min(done_strings, len(unique_strings))
         if retry:
             continue  # runs inside the rebuild stage: don't flip the job status back to 'translating'
         await _update_job(
