@@ -433,8 +433,10 @@ def test_inject_comments_places_marker_and_preserves_segment_text():
         ct_xml = z.read('[Content_Types].xml').decode('utf-8')
         assert '/word/comments.xml' in ct_xml
 
-    # Segment fidelity: re-extracting the commented docx finds the same text.
-    re_extracted = extract_docx_segments(out_bytes)
+    # Segment fidelity: re-extracting the commented docx finds the same text in
+    # every part but comments.xml (extraction reads that one too since the
+    # footnote/comment support; the rebuild's fidelity check excludes it).
+    re_extracted = [s for s in extract_docx_segments(out_bytes) if s['part'] != 'word/comments.xml']
     assert [s['text'] for s in re_extracted] == [s['text'] for s in segments]
 
 
