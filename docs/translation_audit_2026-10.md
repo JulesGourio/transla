@@ -7,7 +7,7 @@ relecture. Les numéros de ligne sont ceux de `432586c` (avant corrections).
 
 ## En bref
 
-- **20 défauts corrigés** (partie A), chacun avec un commit dédié, poussé sur
+- **21 défauts corrigés** (partie A), chacun avec un commit dédié, poussé sur
   `audit/translation` ; **14 points laissés à décider** (partie B).
 - Le plus grave : **du texte pouvait rester dans la langue source sans aucun
   signalement** — segments dont l'identifiant en doublon était abandonné à
@@ -17,7 +17,7 @@ relecture. Les numéros de ligne sont ceux de `432586c` (avant corrections).
 - Les corrections d'**affichage trompeur** : prévisualisation de l'ancienne
   version après « Rebuild again » (A5), fichier d'un job `failed` servi comme s'il
   était bon (A5), message d'erreur effacé (A4).
-- **Vérifié** : `pytest` — 145 tests passent (64 avant l'audit, dont 1 en échec
+- **Vérifié** : `pytest` — 147 tests passent (64 avant l'audit, dont 1 en échec
   dès le départ, corrigé : A20). Chaque correction a un test qui échoue sans elle
   (sauf mention contraire dans la fiche).
 - **Non vérifié** : rien n'a tourné contre Databricks, un vrai LLM, Lakebase
@@ -32,7 +32,7 @@ relecture. Les numéros de ligne sont ceux de `432586c` (avant corrections).
 | Outil | État |
 |---|---|
 | Python 3.12 + `.venv` | présent, mais sans `pytest`/`python-docx` : installés avec `uv pip install` |
-| `pytest` | 9.1.1 installé pour l'audit — 145 passent |
+| `pytest` | 9.1.1 installé pour l'audit — 147 passent |
 | `bun` | **absent** (le client n'a pas été reconstruit) |
 | LibreOffice (`soffice`) | **absent** (aucune conversion PDF testée ; `pages.py` testé avec des PDF PyMuPDF) |
 | Databricks CLI / LLM / Lakebase | pas d'accès (règle du projet) |
@@ -315,6 +315,14 @@ Gravité : 🔴 résultat faux, contenu perdu ou faille · 🟠 gêne réelle ·
 - **Correction.** Le candidat est « réservé » (`pending` → `approved`/`rejected`)
   avant toute écriture, 409 sinon. Commit `f23f1a0`. **Test.** 1.
 
+### A21 🟠 Images `.gif`/`.bmp`/`.tiff` envoyées à l'OCR avec un mauvais type
+
+- **Où.** `docx_images.py` L166 (`'image/png' if …png else 'image/jpeg'`).
+- **Conséquence.** L'appel de vision échouait ; l'image était ignorée sans message,
+  alors que l'utilisateur l'avait cochée.
+- **Correction.** PNG/JPEG envoyés tels quels, les autres convertis en PNG avec Pillow.
+- **Tests.** `tests/test_docx_images.py` (2).
+
 ### A20 🟡 Test périmé en échec depuis avant l'audit ; pagination de l'historique
 
 - `test_inject_comments_places_marker_and_preserves_segment_text` échouait : il
@@ -337,14 +345,14 @@ choix de votre part.
 | B4 | **Intitulés en majuscules avec trait d'union ou apostrophe jamais traduits** : `SOUS-ENSEMBLE`, `PRE-ASSEMBLAGE`, `L'OUTILLAGE`, `CONTROLE-FINAL` sont classés « nom propre » (DNT) comme `BERNARD-SENTAURENS`. Mesuré. | `langdetect.py` L507 | Soit supprimer la règle (les noms propres passent par le LLM, qui les laisse tels quels), soit la limiter aux mots absents du glossaire. Changement visible : à valider. |
 | B5 | **Alerte permanente sur les en-têtes/pieds** : toute traduction plus longue que la source y est « CRITICAL » (seuil 100 %), donc quasiment chaque document finit `done_with_warnings` ; et le drapeau est posé avant le raccourcissement automatique (B1). | `fit_check.py` THRESHOLDS ; `translate.py` L2095 | Relever le seuil des en-têtes (≈120 %) ou ne signaler qu'après raccourcissement. |
 | B6 | **Arabe** : aucun `w:bidi`/`w:rtl` posé à la traduction vers l'arabe (alignement et ponctuation LTR) ; `w:lang` garde la langue source (correcteur orthographique et césure faux) pour toutes les langues. | `rebuild.py` | Poser `w:lang` = langue cible, et `w:bidi`+`w:rtl` pour `ar`. Déjà noté dans `CLAUDE.md` comme risque ouvert. |
-| B7 | **OCR d'images : échec silencieux** (le job continue sans, l'utilisateur ne le sait pas) ; les `.gif`/`.bmp`/`.tiff` sont envoyés avec le type MIME `image/jpeg`. | `translate.py` L541-582 ; `docx_images.py` L166 | Convertir en PNG avec Pillow, et remonter « N images sur M non lues » dans `stage_progress`. |
+| B7 | **OCR d'images : échec silencieux** (le job continue sans, l'utilisateur ne le sait pas). Le type MIME erroné des `.gif`/`.bmp`/`.tiff` est corrigé (A21) ; reste l'absence de message. | `translate.py` L541-582 | Remonter « N images sur M non lues » dans `stage_progress` et l'afficher (changement d'interface). |
 | B8 | **Battement de cœur seulement aux changements d'étape** : une étape longue (lots de plus de 2 min) affiche « may have stalled » ; surtout, avec **plus d'une instance** de l'app, le rattrapage au démarrage de l'une peut marquer `failed` un job vivant de l'autre. | `app.py` L35-57 | Une tâche de battement de cœur pendant les étapes, ou rester sur une instance. |
 | B9 | **Filtre de pages : dérive du curseur** sur du texte répété (un « Oui » trouvé page 30 déplace le curseur et classe les segments suivants hors plage → non traduits). | `pages.py` | Mesurer sur un vrai document avec LibreOffice (absent ici) ; limiter le saut du curseur. |
 | B10 | **Parties du fichier jamais lues** : graphiques, SmartArt, propriétés (titre), texte alternatif des images. Aucun signalement à l'utilisateur. | `extract.py` L64-97 | Lister à l'envoi les parties non traduites. |
 | B11 | **Prévisualisation : course entre deux reconstructions rapprochées** — l'ancien envoi des PDF peut finir après le nouveau et le remplacer. | `translate.py` `_generate_preview_pdfs` | Nommer les PDF par empreinte du `.docx`. Rare. |
 | B12 | **Identité** : sans en-tête `x-forwarded-user`, `user_id` vaut `''` (tous les jobs sans identité sont partagés) et `ENV` non défini = mode développement. Derrière le proxy Databricks l'en-tête est toujours posé. | `user.py` L76-90 | Refuser (401) en production quand l'en-tête manque. |
 | B13 | **Lien de partage** : donne texte source + traduction + fichier à tout utilisateur authentifié ayant le lien, sans expiration ni révocation. | `translate.py` L2549-2641 | Ajouter révocation/expiration si les documents sont sensibles. |
-| B14 | **Commentaires Word** : les segments d'en-tête/pied/note ne sont jamais ancrés (le chemin est cherché dans `document.xml`) et leur commentaire est abandonné sans trace. | `comments.py` L83-125 | Ancrer dans la partie du segment. |
+| B14 | **Commentaires Word** : les segments d'en-tête/pied/note ne sont jamais ancrés (le chemin est cherché dans `document.xml`) et leur commentaire est abandonné sans trace. Word n'accepte de toute façon pas de commentaire dans un en-tête ou un pied. | `comments.py` L83-125 | Rien à ancrer dans les en-têtes ; au minimum compter les commentaires non placés dans `stage_progress`. |
 | B15 | **LibreOffice : délai dépassé** — `subprocess.run(timeout=…)` tue le lanceur mais pas `soffice.bin` (processus orphelins). | `soffice.py` | Lancer dans un groupe de processus et le tuer en entier. |
 
 ## C. Parcours vérifiés sans problème

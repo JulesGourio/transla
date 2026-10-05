@@ -76,6 +76,20 @@ def _make_thumbnail(data: bytes) -> str | None:
         return None
 
 
+def _vision_payload(name: str, data: bytes) -> Tuple[str, bytes]:
+    """(mime, bytes) the vision endpoint can read. Only PNG and JPEG are sent
+    as-is: .gif/.bmp/.tiff used to go out labelled image/jpeg, the call failed,
+    and the image was skipped without a word."""
+    lower = name.lower()
+    if lower.endswith('.png'):
+        return 'image/png', data
+    if lower.endswith(('.jpg', '.jpeg')):
+        return 'image/jpeg', data
+    buf = io.BytesIO()
+    Image.open(io.BytesIO(data)).convert('RGB').save(buf, format='PNG')
+    return 'image/png', buf.getvalue()
+
+
 def _content_hash(data: bytes) -> str:
     """Exact-content hash — deliberately not a perceptual/near-duplicate
     hash: embedded docx images that are "the same picture" (a repeated
@@ -162,8 +176,12 @@ async def ocr_docx_images(
     usage_log: List[Dict[str, Any]] = []
     for h, group in groups.items():
         rep = group['representative']
-        b64 = base64.b64encode(rep['data']).decode('ascii')
-        mime = 'image/png' if rep['name'].lower().endswith('.png') else 'image/jpeg'
+        try:
+            mime, payload = _vision_payload(rep['name'], rep['data'])
+        except Exception as e:
+            logger.warning('docx_images: could not prepare %s for transcription: %s', rep['filename'], e)
+            continue
+        b64 = base64.b64encode(payload).decode('ascii')
         messages = [{'role': 'user', 'content': [
             {'type': 'text', 'text': _OCR_PROMPT},
             {'type': 'image_url', 'image_url': {'url': f'data:{mime};base64,{b64}'}},
