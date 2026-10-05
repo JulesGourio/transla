@@ -118,11 +118,28 @@ Every {source_name} word must now be translated into {target_name}; only part nu
 standards references and proper nouns may stay unchanged."""
 
 
+# asyncio keeps only a weak reference to a running task: a fire-and-forget one
+# can be garbage-collected mid-run (the job then sits in its active status until
+# the stale-heartbeat reconciliation fails it).
+_background_tasks: set = set()
+
+
+def _spawn(coro) -> 'asyncio.Task':
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 def _sanitize_filename(filename: str, fallback: str = 'document') -> str:
     base = os.path.basename((filename or '').strip())
     if not base:
         return fallback
     safe = re.sub(r'[^A-Za-z0-9._-]+', '_', base).strip('._')
+    # keeps the extension; a very long name exceeded the file-name limit and the upload failed
+    if len(safe) > 100:
+        stem, dot, ext = safe.rpartition('.')
+        safe = (stem[:100 - len(ext) - 1] + dot + ext) if dot else safe[:100]
     return safe or fallback
 
 
@@ -561,20 +578,22 @@ async def _insert_questions(job_id: int, questions: List[Dict[str, Any]]) -> Non
 # Background pipeline
 # ---------------------------------------------------------------------------
 
-async def _upload_input_to_volume(job_id: int, docx_bytes: bytes, filename: str) -> None:
+async def _upload_input_to_volume(job_id: int, docx_bytes: bytes, filename: str) -> bool:
     dest = f'{_storage.job_root()}/{job_id}/input_{_sanitize_filename(filename)}'
     try:
         await asyncio.to_thread(_storage.upload, dest, docx_bytes)
         await _update_job(job_id, input_volume_path=dest)
+        return True
     except Exception as e:
         logger.warning('translate job %s: background volume upload failed: %s', job_id, e)
+        return False
 
 
 async def _run_job(job_id: int, docx_bytes: bytes, filename: str,
                    source_lang: str, target_lang: str,
                    selected_images: Optional[List[str]] = None,
                    page_filter: Optional[str] = None) -> None:
-    asyncio.create_task(_upload_input_to_volume(job_id, docx_bytes, filename))
+    upload_task = _spawn(_upload_input_to_volume(job_id, docx_bytes, filename))
 
     # Held only while this stage actively runs (extracting/auditing) — released
     # the moment the job reaches the human-gated awaiting_answers rest state or
@@ -654,6 +673,15 @@ async def _run_job(job_id: int, docx_bytes: bytes, filename: str,
                     page = page_map.get(s['seg_id'])
                     s['out_of_page_range'] = page is not None and page not in page_spec
 
+            # The original is what every rebuild and preview starts from: a job
+            # whose upload to storage failed used to go through the whole
+            # (paid) translation and only fail at rebuild, with a message about
+            # a missing path. Failing here says it while it still costs nothing.
+            if not await upload_task:
+                raise RuntimeError(
+                    'The uploaded file could not be saved to storage, so it cannot be rebuilt or previewed — '
+                    'upload it again, and contact support if this keeps happening'
+                )
             await _insert_segments(job_id, audit_report['segments'])
             await _insert_questions(job_id, questions)
 
@@ -727,7 +755,7 @@ async def create_translation_job(
         original_filename=filename, selected_image_paths=selected_image_paths,
         page_filter=pages.strip(),
     )
-    asyncio.create_task(_run_job(
+    _spawn(_run_job(
         job_id, data, filename,
         source_lang.strip().lower(), target_lang.strip().lower(),
         selected_image_paths, pages.strip(),
@@ -902,7 +930,7 @@ async def restart_translation_job(job_id: int, request: Request, body: RestartIn
             )
 
     await _discard_preview_pdfs(job_id)
-    asyncio.create_task(_run_job(
+    _spawn(_run_job(
         job_id, docx_bytes, job['original_filename'], job['source_lang'], job['target_lang'],
         selected_image_paths, job['page_filter'],
     ))
@@ -962,7 +990,7 @@ async def validate_translation_job(job_id: int, request: Request):
         )
 
     if job['target_lang']:
-        asyncio.create_task(_propose_glossary_candidates(job_id, job['source_lang'], job['target_lang']))
+        _spawn(_propose_glossary_candidates(job_id, job['source_lang'], job['target_lang']))
     return {'glossary_validated_at': row['glossary_validated_at'].isoformat()}
 
 
@@ -1800,7 +1828,7 @@ async def start_translation(job_id: int, request: Request):
     if not claimed:
         return JSONResponse({'error': 'Job status changed — refresh and try again'}, status_code=409)
 
-    asyncio.create_task(_run_translation_stage(job_id, job['source_lang'], job['target_lang']))
+    _spawn(_run_translation_stage(job_id, job['source_lang'], job['target_lang']))
     return {'status': 'translating'}
 
 
@@ -2295,7 +2323,7 @@ async def _run_rebuild_stage(job_id: int, source_lang: str, include_review_comme
         # status panel: both byte buffers are already in memory here, so the
         # side-by-side preview is a plain download by the time it opens.
         if final_status in ('done', 'done_with_warnings') and output_path:
-            asyncio.create_task(_generate_preview_pdfs(job_id, src_bytes, rebuilt_bytes, output_path))
+            _spawn(_generate_preview_pdfs(job_id, src_bytes, rebuilt_bytes, output_path))
         # Glossary candidates are proposed only once a reviewer explicitly
         # validates the document (POST /translate/jobs/{id}/validate) — never
         # automatically here, however the job turned out.
@@ -2374,7 +2402,7 @@ async def start_rebuild(job_id: int, request: Request, include_review_comments: 
     if not claimed:
         return JSONResponse({'error': 'Job status changed — refresh and try again'}, status_code=409)
 
-    asyncio.create_task(_run_rebuild_stage(job_id, job['source_lang'], include_review_comments))
+    _spawn(_run_rebuild_stage(job_id, job['source_lang'], include_review_comments))
     return {'status': 'fit_checking'}
 
 
@@ -2450,7 +2478,7 @@ async def get_translation_preview(job_id: int, request: Request, format: str = '
             logger.error('translate job %s: pdf conversion failed: %s', job_id, e)
             return JSONResponse({'error': f'PDF conversion failed: {e}'}, status_code=502)
         # Persist for next time (page refresh, other reviewer, app restart).
-        asyncio.create_task(
+        _spawn(
             _generate_preview_pdfs(job_id, original_bytes, output_bytes, job['output_volume_path'])
         )
         return {

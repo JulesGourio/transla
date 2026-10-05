@@ -343,3 +343,63 @@ def test_the_endpoint_answers_422_for_a_dangerous_rule():
     with patch.object(T, 'get_pool', return_value=pool):
         resp = _run(T.add_dnt_rule(T.DntRuleIn(pattern='*', match_mode='prefix')))
     assert resp.status_code == 422
+
+
+# --- the first stage (extract + audit) and the stored original ---
+
+def _run_first_stage(pool, docx, upload_side_effect=None):
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T._storage, 'upload', side_effect=upload_side_effect), \
+            patch.object(T._storage, 'job_root', return_value='/out'):
+        _run(T._run_job(1, docx, 'a.docx', 'bg', 'fr'))
+
+
+def test_a_job_whose_original_could_not_be_stored_fails_before_any_translation_is_paid_for():
+    docx = build_docx(para('Здравей свят'))
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='uploaded', source_lang='bg', target_lang='fr')
+    _run_first_stage(pool, docx, upload_side_effect=OSError('volume write denied'))
+    job = pool.job()
+    assert job['status'] == 'failed'
+    assert 'could not be saved to storage' in job['error_msg']
+    assert pool.db.execute('SELECT COUNT(*) FROM translation_segments').fetchone()[0] == 0
+
+
+def test_a_job_with_a_stored_original_reaches_the_questions_stage():
+    docx = build_docx(para('Здравей свят'))
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='uploaded', source_lang='bg', target_lang='fr')
+    _run_first_stage(pool, docx)
+    job = pool.job()
+    assert (job['status'], job['error_msg']) == ('awaiting_answers', None)
+    assert job['input_volume_path'] == '/out/1/input_a.docx'
+
+
+def test_a_corrupt_file_keeps_its_error_message_even_though_the_upload_finishes_later():
+    pool = FakePool()
+    pool.add_job(id=1, user_id='u', status='uploaded', source_lang='bg', target_lang='fr')
+    _run_first_stage(pool, b'not a docx')
+    job = pool.job()
+    assert job['status'] == 'failed' and job['error_msg']
+
+
+def test_long_file_names_are_shortened_but_keep_their_extension():
+    name = T._sanitize_filename('A' * 300 + '.docx')
+    assert len(name) <= 100 and name.endswith('.docx')
+
+
+def test_spawned_tasks_are_kept_alive_until_they_finish():
+    async def go():
+        done = asyncio.Event()
+
+        async def work():
+            await done.wait()
+
+        task = T._spawn(work())
+        assert task in T._background_tasks
+        done.set()
+        await task
+        await asyncio.sleep(0)
+        assert task not in T._background_tasks
+
+    _run(go())

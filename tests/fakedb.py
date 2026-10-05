@@ -27,6 +27,11 @@ CREATE TABLE glossary_terms (
     id INTEGER PRIMARY KEY, term_id TEXT UNIQUE, en TEXT, fr TEXT, cs TEXT, bg TEXT, de TEXT, es TEXT,
     pt TEXT, ar TEXT, domain TEXT, notes TEXT, definition TEXT, definition_source TEXT
 );
+CREATE TABLE dnt_rules (id INTEGER PRIMARY KEY, pattern TEXT, type TEXT, match_mode TEXT, notes TEXT);
+CREATE TABLE translation_questions (
+    id INTEGER PRIMARY KEY, job_id INTEGER, q_id TEXT, seg_ids TEXT, category TEXT, question_text TEXT,
+    context TEXT, suggested_answer TEXT, answer TEXT, UNIQUE (job_id, q_id)
+);
 CREATE TABLE translation_segments (
     id INTEGER PRIMARY KEY, job_id INTEGER, seg_id TEXT, part TEXT, location_type TEXT,
     xml_choice_path TEXT, xml_fallback_path TEXT, source_text TEXT, detected_lang TEXT,
