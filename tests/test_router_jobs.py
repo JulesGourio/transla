@@ -96,7 +96,7 @@ def test_translating_a_segment_that_failed_before_clears_the_failure_flag():
     pool.add_segment(job_id=1, seg_id='s2', source_text='Здравей', pattern_type='mono', conflict_flag=1,
                      conflict_detail='Same source text translated differently elsewhere in this document',
                      dnt_tokens='[]')
-    plan = {'compose': lambda tr: tr, 'kept_text': '', 'inline_json': None}
+    plan = {'compose': lambda tr: tr, 'kept_text': '', 'inline_json': None, 'query': 'Здравей'}
 
     async def go():
         async with pool.acquire() as conn:
@@ -403,3 +403,49 @@ def test_spawned_tasks_are_kept_alive_until_they_finish():
         assert task not in T._background_tasks
 
     _run(go())
+
+
+# --- suspiciously short / long translations ---
+
+def _apply(pool, seg_id, source, translated, dnt_tokens='[]'):
+    plan = {'compose': lambda tr: tr, 'kept_text': '', 'inline_json': None, 'query': source}
+
+    async def go():
+        async with pool.acquire() as conn:
+            row = dict(await conn.fetchrow('SELECT * FROM translation_segments WHERE seg_id = $1', seg_id))
+            row['dnt_tokens'] = dnt_tokens
+            await T._apply_resolved_segment(conn, row, plan, translated, {}, 'bg')
+
+    _run(go())
+    return pool.segment(seg_id)
+
+
+LONG = 'Притегнете гайката до момент 35 Nm и проверете наличието на хлабина по цялата дължина на болта'
+
+
+def test_a_translation_that_dropped_most_of_a_long_paragraph_is_flagged():
+    pool = FakePool()
+    pool.add_segment(job_id=1, seg_id='s', source_text=LONG)
+    seg = _apply(pool, 's', LONG, 'Serrer')
+    assert seg['conflict_flag'] == 1 and 'incomplete' in seg['conflict_detail']
+
+
+def test_a_normal_translation_is_not_flagged():
+    pool = FakePool()
+    pool.add_segment(job_id=1, seg_id='s', source_text=LONG)
+    seg = _apply(pool, 's', LONG, 'Serrer l\'écrou au couple de 35 Nm et vérifier le jeu sur toute la longueur du boulon')
+    assert seg['conflict_flag'] == 0
+
+
+def test_short_labels_are_never_judged_on_length():
+    pool = FakePool()
+    pool.add_segment(job_id=1, seg_id='s', source_text='Винт')
+    assert _apply(pool, 's', 'Винт', 'Vis M8 à tête hexagonale')['conflict_flag'] == 0
+
+
+def test_a_length_flag_from_the_previous_translation_is_reset_by_the_new_one():
+    pool = FakePool()
+    pool.add_segment(job_id=1, seg_id='s', source_text=LONG, conflict_flag=1,
+                     conflict_detail='Translation looks incomplete (much shorter than the source)')
+    seg = _apply(pool, 's', LONG, 'Serrer l\'écrou au couple de 35 Nm et vérifier le jeu sur toute la longueur du boulon')
+    assert (seg['conflict_flag'], seg['conflict_detail']) == (0, None)

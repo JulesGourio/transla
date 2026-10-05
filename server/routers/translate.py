@@ -1568,6 +1568,27 @@ def _plan_segment_translation(row: Dict[str, Any], source_lang: str,
     return None
 
 
+_OWN_FLAG_SQL = (
+    "COALESCE(conflict_detail, '') LIKE 'Translation failed%' "
+    "OR COALESCE(conflict_detail, '') LIKE 'Translation looks%' "
+    "OR COALESCE(conflict_detail, '') LIKE 'DNT token(s) lost%'"
+)
+
+
+def _length_anomaly(source: str, translated: str) -> Optional[str]:
+    """A translation far shorter than a long source is a dropped sentence; far
+    longer, text the model added. Neither is caught anywhere else: the residual
+    check only looks for leftover source words, so a half-translated paragraph
+    read as finished. Wide margins (languages differ by ~±40%) keep this to the
+    cases that are wrong in any language pair."""
+    n_src, n_tr = len(source.strip()), len(translated.strip())
+    if n_src >= 60 and n_tr < 0.3 * n_src:
+        return 'Translation looks incomplete (much shorter than the source)'
+    if n_src >= 40 and n_tr > 3 * n_src:
+        return 'Translation looks too long (text may have been added)'
+    return None
+
+
 async def _apply_resolved_segment(
     conn, seg_row: Dict[str, Any], plan: Dict[str, Any], translated_span: str,
     by_source: Dict[str, Dict[str, List[int]]], source_lang: str,
@@ -1595,17 +1616,20 @@ async def _apply_resolved_segment(
     # flagged in the Segments panel. COALESCE keeps any detail audit.py
     # already set rather than overwriting it.
     dnt_detail = f"DNT token(s) lost in translation: {', '.join(lost_tokens)}" if dnt_lost else None
+    length_detail = _length_anomaly(plan['query'], translated_span)
+    dnt_detail = dnt_detail or length_detail
+    dnt_lost = dnt_lost or bool(length_detail)
     # A segment reaching this point was, by definition, planned for
     # translation — i.e. its true language is the document's source
     # language, whatever the audit's (possibly wrong) per-segment guess had
     # said. Correct detected_lang here too, or the Lang column keeps
     # advertising a stale/wrong detection on an otherwise well-translated row.
     await conn.execute(
-        # A flag left by an earlier failed attempt described a state that no
-        # longer exists once the segment has a translation.
+        # A flag this function (or the failure path) left on the PREVIOUS
+        # translation of the segment describes a state that no longer exists.
         'UPDATE translation_segments SET translated_text = $2, '
-        "conflict_flag = (conflict_flag AND COALESCE(conflict_detail, '') NOT LIKE 'Translation failed%') OR $3, "
-        "conflict_detail = CASE WHEN conflict_detail LIKE 'Translation failed%' THEN $5 "
+        f"conflict_flag = (conflict_flag AND NOT ({_OWN_FLAG_SQL})) OR $3, "
+        f"conflict_detail = CASE WHEN {_OWN_FLAG_SQL} THEN $5 "
         'ELSE COALESCE(conflict_detail, $5) END, '
         'inline_split = COALESCE($4, inline_split), '
         'detected_lang = $6, lang_confidence = NULL WHERE id = $1',
