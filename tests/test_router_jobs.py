@@ -475,3 +475,21 @@ def test_a_translation_that_was_written_is_not_flagged():
     _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0), dict(translated_text='Second EN', keep_as_is=0)])
     _run_rebuild(pool, docx)
     assert pool.job()['status'] == 'done'
+
+
+def test_job_list_paging_arguments_are_clamped():
+    from tests import fakedb
+    pool = FakePool()
+    seen = []
+    real = fakedb.FakeConn.fetch
+
+    async def spy(self, sql, *args):
+        seen.append(args)
+        return await real(self, sql, *args)
+
+    with patch.object(T, 'get_pool', return_value=pool), \
+            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(fakedb.FakeConn, 'fetch', spy):
+        _run(T.list_translation_jobs(_request(), limit=-5, offset=-3))
+        _run(T.list_translation_jobs(_request(), limit=10**6, offset=0))
+    assert seen[0][1:] == (1, 0) and seen[1][1:] == (200, 0)

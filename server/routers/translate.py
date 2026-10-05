@@ -2660,6 +2660,7 @@ async def list_translation_jobs(request: Request, limit: int = 20, offset: int =
     if not pool:
         return {'jobs': [], 'total': 0, 'available': False}
 
+    limit, offset = max(1, min(limit, 200)), max(0, offset)  # a negative LIMIT is a Postgres error (500)
     identity = await get_user_identity(request)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
