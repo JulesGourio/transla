@@ -111,3 +111,10 @@ def test_a_non_breaking_hyphen_is_not_doubled_after_translation():
 def test_control_characters_in_a_translation_do_not_crash_the_rebuild():
     xml = _rebuilt_xml(para('Hello there'), 'Bon\x0bjour\x00 tout')
     assert 'Bonjour tout' in xml
+
+
+def test_part_numbers_with_a_non_breaking_hyphen_are_still_do_not_translate():
+    from server.services.translation.langdetect import extract_dnt_tokens, is_dnt_candidate
+    plain, nbh = 'NAS1726-4D', 'NAS1726' + chr(0x2011) + '4D'
+    assert is_dnt_candidate(nbh) == is_dnt_candidate(plain)
+    assert extract_dnt_tokens('Use ' + nbh + ' here') == extract_dnt_tokens('Use ' + plain + ' here')

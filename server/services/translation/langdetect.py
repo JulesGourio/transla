@@ -471,11 +471,21 @@ DNT_PATTERNS = [
 DNT_REGEX = re.compile("|".join(DNT_PATTERNS))
 
 
+# extract.py reads <w:noBreakHyphen/> as U+2011; the part-number patterns above
+# are written with the ASCII hyphen.
+_NBH_TO_HYPHEN = str.maketrans("\u2011", "-")
+
+
+def normalize_hyphens(text: str) -> str:
+    return text.translate(_NBH_TO_HYPHEN)
+
+
 def extract_dnt_tokens(text: str, matcher: DntMatcher | None = None) -> list[str]:
     """Return list of DNT tokens found in the text: built-in regex matches
     (part numbers, standards, dates) plus, if a matcher is given, any
     reviewer-curated dnt_rules pattern (exact/prefix/glob/regex) matching a
     whitespace-delimited token in the text."""
+    text = normalize_hyphens(text)
     tokens = DNT_REGEX.findall(text)
     if matcher is not None:
         for word in re.findall(r"\S+", text):
@@ -492,7 +502,7 @@ def is_dnt_candidate(text: str, matcher: DntMatcher | None = None) -> bool:
 
     Used to skip translation entirely for these segments.
     """
-    s = text.strip()
+    s = normalize_hyphens(text).strip()
     if not s:
         return False
     # Single uppercase letter - revision indicator

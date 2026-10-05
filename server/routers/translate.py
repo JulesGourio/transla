@@ -48,6 +48,7 @@ from ..services.translation.audit import determine_mode as _determine_mode
 from ..services.translation.comments import inject_comments
 from ..services.translation.docx_images import find_image_anchors, list_docx_images, ocr_docx_images, order_ocr_segments
 from ..services.translation.glossary_io import dnt_rule_problem
+from ..services.translation.langdetect import normalize_hyphens
 from ..services.translation.glossary_extract import extract_job_candidates, normalize_term
 from ..services.translation import glossary_lakebase as _glossary_lakebase
 from ..services.translation.glossary_lakebase import generate_term_id
@@ -1556,7 +1557,8 @@ async def _apply_resolved_segment(
         tokens = json.loads(seg_row['dnt_tokens'] or '[]')
     except (TypeError, json.JSONDecodeError):
         tokens = []
-    lost_tokens = [t for t in tokens if t not in translated and t not in plan['kept_text']]
+    translated_norm, kept_norm = normalize_hyphens(translated), normalize_hyphens(plan['kept_text'])
+    lost_tokens = [t for t in tokens if t not in translated_norm and t not in kept_norm]
     dnt_lost = bool(lost_tokens)
     # conflict_flag alone used to reach this point with no conflict_detail —
     # generate_review_comments requires BOTH to emit a Word comment, so a
