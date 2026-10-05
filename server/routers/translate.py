@@ -1100,13 +1100,32 @@ async def retranslate_segment(job_id: int, seg_id: str, request: Request):
         if not job:
             return JSONResponse({'error': 'Not found'}, status_code=404)
         seg = await conn.fetchrow(
-            'SELECT source_text FROM translation_segments WHERE job_id = $1 AND seg_id = $2',
+            'SELECT source_text, pattern_type, inline_split FROM translation_segments '
+            'WHERE job_id = $1 AND seg_id = $2',
             job_id, seg_id,
         )
         if not seg:
             return JSONResponse({'error': 'Segment not found'}, status_code=404)
     if not seg['source_text']:
         return JSONResponse({'error': 'Segment has no source text to translate'}, status_code=409)
+
+    # A bilingual-inline segment holds BOTH languages: only its source side may
+    # go to the LLM, and the stored text is composed exactly as the translation
+    # stage does. Sending the whole text translated the kept side too, and for a
+    # format split the full text was spliced into the source side's runs only,
+    # duplicating the kept side in the document.
+    plan = None
+    if seg['pattern_type'] in _INLINE_PATTERNS:
+        try:
+            inline = json.loads(seg['inline_split']) if seg['inline_split'] else None
+        except (TypeError, json.JSONDecodeError):
+            inline = None
+        plan = _plan_segment_translation(
+            {'pattern_type': seg['pattern_type'], 'source_text': seg['source_text'], 'inline_split': inline,
+             'detected_lang': job['source_lang'], 'lang_confidence': None, 'out_of_page_range': False},
+            job['source_lang'], job['target_lang'], 'monolingual',
+        )
+    query = plan['query'] if plan else seg['source_text']
 
     endpoint = os.getenv('TRANSLATE_ENDPOINT', os.getenv('COMPARE_ANALYSIS_ENDPOINT', ''))
     host, token = _get_llm_credentials()
@@ -1116,26 +1135,28 @@ async def retranslate_segment(job_id: int, seg_id: str, request: Request):
     glossary_rows = await _get_glossary_rows()
     try:
         result = await _translate_batch(
-            host, token, endpoint, [seg['source_text']], job['source_lang'], job['target_lang'], glossary_rows, job_id,
+            host, token, endpoint, [query], job['source_lang'], job['target_lang'], glossary_rows, job_id,
         )
     except Exception as e:
         return JSONResponse({'error': f'Translation failed: {e}'}, status_code=502)
-    new_text = result.get(seg['source_text'])
+    new_text = result.get(query)
     if not new_text:
         return JSONResponse(
             {'error': 'The LLM did not return a translation — try again or edit the text manually'},
             status_code=502,
         )
+    if plan:
+        new_text = plan['compose'](new_text)
 
     async with pool.acquire() as conn:
         await conn.execute(
             '''
             UPDATE translation_segments
             SET translated_text = $3, keep_as_is = FALSE, conflict_flag = FALSE, conflict_detail = NULL,
-                detected_lang = $4, lang_confidence = NULL
+                detected_lang = $4, lang_confidence = NULL, inline_split = COALESCE($5, inline_split)
             WHERE job_id = $1 AND seg_id = $2
             ''',
-            job_id, seg_id, new_text, job['source_lang'],
+            job_id, seg_id, new_text, job['source_lang'], plan['inline_json'] if plan else None,
         )
     return {'seg_id': seg_id, 'translated_text': new_text}
 
