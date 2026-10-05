@@ -161,7 +161,10 @@ async def _update_job(
     output_volume_path: Optional[str] = None,
 ) -> None:
     """Best-effort job update; always refreshes worker_pid/worker_heartbeat
-    when status is provided (i.e. this process is actively driving the job)."""
+    when status is provided (i.e. this process is actively driving the job).
+    error_type/error_msg only change together with a status: the background
+    input upload (no status) used to land after a fast failure and wipe its
+    message, leaving a failed job that said nothing."""
     pool = get_pool()
     if not pool:
         return
@@ -172,8 +175,8 @@ async def _update_job(
                 UPDATE translation_jobs
                 SET status                  = COALESCE($2, status),
                     stage_progress          = COALESCE($3, stage_progress),
-                    error_type               = $4,
-                    error_msg                = $5,
+                    error_type               = CASE WHEN $2 IS NOT NULL THEN $4 ELSE error_type END,
+                    error_msg                = CASE WHEN $2 IS NOT NULL THEN $5 ELSE error_msg END,
                     segment_count            = COALESCE($6, segment_count),
                     needs_translation_count  = COALESCE($7, needs_translation_count),
                     input_volume_path        = COALESCE($8, input_volume_path),
