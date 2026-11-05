@@ -418,7 +418,8 @@ volumes above; archive rebuilt locally into gitignored `build/libreoffice/`
 already exceeded — see `../side_project/rapport_git_lfs.md`). Job files fall
 back to local container disk when `TRANSLATE_VOLUME_PATH` is empty
 (`server/services/storage.py`). Every Databricks step for the user lives in
-`OPS_COMMANDS.md` — keep it the single place for exact commands.
+`HANDOVER.md` (sections 3 to 5, in French, in full) — keep it the single place
+for exact commands.
 
 Bundle name: `latlang`. Targets: `dev`, `latlang-uat`, `latlang-prod`.
 
@@ -431,6 +432,19 @@ Bundle name: `latlang`. Targets: `dev`, `latlang-uat`, `latlang-prod`.
 - On this machine, `DATABRICKS_TOKEN` is set globally by the VS Code
   Databricks extension's integrated terminal and can silently override
   `--profile` — `unset DATABRICKS_TOKEN` before any `databricks` CLI call.
+
+## Documentation
+
+- One README per folder that matters, in English, each with the same shape: what the folder is, `Parent:` link, a file
+  table, how it works, rules, `See also` links. READMEs link to each other both ways; a folder of assets or data says it
+  has no README in its parent's table.
+- READMEs describe the code as it is now, in the present tense: no history, no dates, no incident story, no mention of
+  an audit, a review, a bug fix, a CLAUDE.md or an assistant. History belongs in git.
+- Reference material that belongs to no folder is in `docs/` (pipeline, Lakebase schema).
+- `HANDOVER.md` (French) is the operating guide: environments, deployment, jobs, procedures, known failures, open items.
+  Update it in the same commit as any change of deployment, grants, jobs or configuration.
+- A change to a route, a table, a setting or a pipeline stage updates the README of its folder, `docs/` and the root
+  README table of settings when they describe it.
 
 ## Code
 

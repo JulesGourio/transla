@@ -1,7 +1,6 @@
 """Corroboration inter-langues des définitions (definition_source=cross_lang_pair).
 
-Idée de Jules (2026-07-16, voir docs/ROADMAP.md § glossaire) : une définition
-AUTHENTIQUE extraite d'une section terminologie dans UNE langue
+Principe : une définition AUTHENTIQUE extraite d'une section terminologie dans UNE langue
 (extract_index_terms.py) + la paire de traduction confirmée du même terme
 dans une autre famille (build_review_batch.py) suffisent quasiment toujours —
 la traduction professionnelle en contexte désambiguïse le sens, la définition

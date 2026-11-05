@@ -1514,7 +1514,7 @@ def _plan_segment_translation(row: Dict[str, Any], source_lang: str,
     and the other side must survive verbatim. Sending the whole text (the
     pre-2026-07-17 behaviour) either translated the kept side too, or —
     when the whole-text language label wasn't source_lang — silently skipped
-    the segment entirely (client/src/components/translate/README.md "Known issue").
+    the segment entirely (see docs/pipeline.md, audit step).
 
     Returns {'query', 'compose', 'kept_text', 'inline_json'}:
       - query: the exact string to translate (deduped across segments)
@@ -2756,7 +2756,7 @@ async def submit_feedback(body: FeedbackRequest, request: Request):
 
 # ---------------------------------------------------------------------------
 # Sharing — read-only link, anyone with the token can view (no ownership
-# check on the GET), mirrors Qualibot Chat's share_token pattern.
+# check on the GET).
 # ---------------------------------------------------------------------------
 
 @router.post('/translate/jobs/{job_id}/share', dependencies=[Depends(require_translate)])
@@ -2855,7 +2855,7 @@ async def get_shared_translation_job(token: str):
 
 
 # ---------------------------------------------------------------------------
-# Glossary / DNT CRUD — Lakebase-backed, replaces Translator/glossary/*.csv
+# Glossary / DNT CRUD — Lakebase-backed
 # ---------------------------------------------------------------------------
 
 class GlossaryTermIn(BaseModel):
@@ -2972,8 +2972,7 @@ async def delete_dnt_rule(rule_id: int):
 
 # ---------------------------------------------------------------------------
 # Glossary candidate review — pending queue populated by
-# utils/glossary/sync_candidates_to_lakebase.py (replaces hand-editing the
-# `status` column of Translator/glossary/candidates/*.csv). Approving a
+# utils/glossary/sync_candidates_to_lakebase.py. Approving a
 # candidate inserts it into glossary_terms (same T#### generation as
 # upsert_glossary_term above); rejecting just records a reason.
 # ---------------------------------------------------------------------------

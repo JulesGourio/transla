@@ -1,6 +1,5 @@
-"""Pixel-level page diff for the Translate tab's preview — the closest thing
-to the original Translator POC's compare.py "Difference" toggle (grayscale
-original with red highlights over pixel-level changes).
+"""Pixel-level page diff for the Translate tab's preview: the grayscale
+original with red highlights over pixel-level changes.
 """
 from __future__ import annotations
 

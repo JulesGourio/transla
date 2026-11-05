@@ -16,8 +16,8 @@ Steps (all pure Python, runs fine on Windows):
 Usage:
   uv run --no-project --with zstandard utils/soffice_packaging/package_libreoffice.py <downloaded.tar.gz> <output.tar.gz>
 
-Upload and app config: see OPS_COMMANDS.md (archive goes to the `binaries`
-volume, path set in utils/deploy/target_env.json).
+The archive goes to the `binaries` volume; its path is set in
+utils/deploy/target_env.json.
 """
 
 import gzip
@@ -198,7 +198,7 @@ def main(bundle_path: str, output_path: str) -> None:
             tar.add(lo_root, arcname=lo_root.name, filter=normalize)
 
         print(f'done: {output} ({output.stat().st_size / 1e6:.0f} MB)')
-        print('upload: see OPS_COMMANDS.md')
+        print('upload the archive to the binaries volume')
 
 
 if __name__ == '__main__':

@@ -3,13 +3,10 @@ grows going forward. The offline Intraqual corpus import
 (utils/glossary/{build_review_batch,sync_candidates_to_lakebase,promote_pending_candidates}.py)
 is a one-time supplementary bootstrap; it stays, but is not this.
 
-Mirrors the original standalone Translator prototype's workflow (its
-CLAUDE.md documented step 8: a validated job proposes term candidates, a
-human reviews and confirms them into the glossary) — "propose" here means an
-LLM extraction over the job's own confirmed source->target segment pairs (a
-translation a human has actually reviewed via the job's Q&A + preview, not a
-guess), and "confirm" is the existing glossary_candidates pending-review
-queue (GlossaryPanel.tsx "To review" tab) rather than a hand-edited CSV.
+A validated job proposes term candidates and a human reviews them: "propose"
+is an LLM extraction over the job's own source->target segment pairs (a
+translation a human has reviewed via the Q&A and the preview), and "confirm"
+is the glossary_candidates pending-review queue (GlossaryPanel.tsx).
 Candidates land at status='pending' — never auto-published like the corpus
 bootstrap, human validation stays the standard gate.
 """

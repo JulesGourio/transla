@@ -27,9 +27,7 @@ one pair_id):
                             (script switch, then sentence boundaries), then
                             each side is language-detected on its own —
                             detect_language on the whole text can only ever
-                            return one label
-                            (client/src/components/translate/README.md
-                            "Known issue: language detection").
+                            return one label.
 
 Segments not paired remain pattern_type = "mono" (or "dnt" / "numeric_only").
 
@@ -481,7 +479,7 @@ def pair_inline_charspan(audited: list[dict]) -> None:
     with no '/' separator and no formatting break — the case that fell
     through pair_inline_slash/pair_inline_format_concat and got ONE
     detect_language label for two languages' content, silently leaving the
-    outvoted language untranslated (client/src/components/translate/README.md "Known issue")."""
+    outvoted language untranslated."""
     for seg in audited:
         if seg["pair_id"] or seg["pattern_type"] != "mono":
             continue

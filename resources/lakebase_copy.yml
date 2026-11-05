@@ -6,7 +6,7 @@
 # Requirements: serverless only (classic job clusters cannot reach the
 # Lakebase private endpoint); the run_as service principal needs a Postgres
 # role on the `qualibot` project and USE SCHEMA + CREATE TABLE on the target
-# schema (see OPS_COMMANDS.md).
+# schema (grants: utils/databricks_ops/grants).
 
 targets:
   latlang-uat:
