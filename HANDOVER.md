@@ -84,19 +84,25 @@ Le nom du fichier doit être celui de `SOFFICE_ARCHIVE_VOLUME_PATH` dans [utils/
 
 ### 3.4 Donner à l'application ses droits sur les volumes
 
-L'application s'exécute avec son propre service principal. Il lui faut `READ` sur `binaries` et `READ`+`WRITE` sur
-`documents` (le job donne aussi `USE CATALOG` et `USE SCHEMA`) :
+L'application s'exécute avec son propre service principal. Il lui faut `USE CATALOG`, `USE SCHEMA`, `READ VOLUME` sur
+`binaries` et `READ VOLUME` + `WRITE VOLUME` sur `documents`. Les droits se donnent à la main (aucun job, aucune ressource
+du bundle : Terraform donnerait `USE CATALOG` à tous les utilisateurs du compte). Il faut `MANAGE` sur le catalogue.
+
+Générer les instructions avec l'identifiant du service principal (`service_principal_client_id`, aussi le champ `id` de
+`apps get`, et non `oauth2_app_client_id`, qui désigne une autre intégration), puis les coller dans l'éditeur SQL :
 
 ```powershell
 $sp = (databricks apps get latlang --profile UAT -o json | ConvertFrom-Json).service_principal_client_id
-databricks bundle run grant_volume_access --target latlang-uat --profile UAT --params "service_principal=$sp"
+$cat = 'uat_proj'
+@"
+GRANT USE CATALOG ON CATALOG $cat TO ``$sp``;
+GRANT USE SCHEMA ON SCHEMA $cat.latlang TO ``$sp``;
+GRANT READ VOLUME ON VOLUME $cat.latlang.binaries TO ``$sp``;
+GRANT READ VOLUME, WRITE VOLUME ON VOLUME $cat.latlang.documents TO ``$sp``;
+"@
 ```
 
-En DEV le même job existe (`--target dev --profile DEV`), sans service principal de job : il s'exécute sous votre compte,
-qui doit avoir `MANAGE` sur `dev_proj`.
-
-Utiliser bien `service_principal_client_id` (c'est aussi le champ `id` de `apps get`), et non l'identifiant
-`oauth2_app_client_id`, qui désigne une autre intégration.
+Pour DEV : `--profile DEV` et `$cat = 'dev_proj'`. Contrôle : `databricks grants get volume $cat.latlang.documents --profile UAT -o json | Select-String $sp`.
 
 ### 3.5 Créer le rôle Postgres de l'application
 
@@ -206,7 +212,6 @@ Supprimer la règle trouvée depuis le panneau Glossaire de l'application.
 | `D_0_latlang-lakebase-copy-latlang-uat` | Copie chaque table de la base Lakebase `latlang` vers des tables Delta du schéma | tous les jours 02:00 (Europe/Paris) | UAT |
 | `WD_0_latlang_start_app_latlang-uat` | Démarre l'application | lundi au vendredi 08:00 (Europe/Paris) | UAT |
 | `WD_1_latlang_stop_app_latlang-uat` | Arrête l'application | lundi au vendredi 19:00 (Europe/Paris) | UAT |
-| `latlang-grant-volume-access-latlang-uat` | Donne au service principal de l'application ses droits sur les volumes | manuel | UAT |
 
 L'application est donc arrêtée la nuit et le week-end en UAT. Pour la démarrer à la main :
 `databricks apps start latlang --profile UAT`.
@@ -257,7 +262,7 @@ Chaque étape est décrite dans [docs/pipeline.md](docs/pipeline.md) et son code
 | L'application démarre mais `/` répond `{"detail":"Not Found"}`, `/api/*` répond | `client/out` n'a pas été envoyé | Redéployer **sans** `-SkipBuild` |
 | `password authentication failed` dans les logs au démarrage | Pas de rôle Postgres pour le service principal de l'application | [§3.5](#35-créer-le-rôle-postgres-de-lapplication) |
 | `permission denied to create database` dans les logs | Le rôle existe sans `createdb` | Supprimer le rôle (`databricks postgres delete-role`) et le recréer avec `createdb` |
-| `User does not have READ VOLUME on Volume …` | Droits du volume manquants (ou posés avant la dernière version du job) | Relancer le job de droits ([§3.4](#34-donner-à-lapplication-ses-droits-sur-les-volumes)) ; une tâche créée avant la correction garde un chemin d'original vide et doit être recréée |
+| `User does not have READ VOLUME on Volume …` | Droits du volume manquants  | Redonner les droits ([§3.4](#34-donner-à-lapplication-ses-droits-sur-les-volumes)) ; une tâche créée avant la correction garde un chemin d'original vide et doit être recréée |
 | Preview : « Exact PDF rendering unavailable » (501) | LibreOffice indisponible | Ouvrir `/api/translate/render-engine` pour lire la cause (archive absente, mauvais nom, droits) |
 | Preview : « PDF conversion failed » (502) | LibreOffice a échoué sur ce document | Lire les logs ; tester le document dans Word |
 | Une tâche reste en `failed` avec `OrphanedJob` | L'application a redémarré pendant l'étape | Relancer l'étape depuis l'interface |
@@ -271,7 +276,7 @@ Chaque étape est décrite dans [docs/pipeline.md](docs/pipeline.md) et son code
   `pyproject.toml`. Ajouter une dépendance aux deux.
 - **Ne pas déclarer `resources` (`uc_securable`) sur l'application dans `databricks.yml`** : Terraform tenterait de donner
   `USE CATALOG` à tous les utilisateurs du compte et échouerait sans `MANAGE` sur le catalogue. Les droits de l'application
-  passent par le job de droits.
+  se donnent à la main ([§3.4](#34-donner-à-lapplication-ses-droits-sur-les-volumes)).
 - **Ne pas déclarer dans ce bundle une ressource déjà gérée par un autre bundle** (schéma, projet Lakebase) : le déploiement
   échoue avec « already exists ». Le projet Lakebase n'est référencé que par son identifiant.
 - **`client/out` est ignoré par Git** : `databricks.yml` le force dans la synchronisation (`sync.include`), le script de

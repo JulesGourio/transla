@@ -5,3 +5,4 @@ client/public/
 **/*.pyc
 .venv
 .env.local
+runbooks

@@ -48,6 +48,7 @@ sync:
     - "client/src/**"
     - "client/public/**"
     - "client/node_modules/**"
+    - "runbooks/**"
     - ".git/**"
     - ".databricks/**"
     - "__pycache__/**"
@@ -75,7 +76,7 @@ resources:
           level: CAN_MANAGE
 
   # No `grants:` blocks here: Terraform grants are authoritative and would
-  # wipe the app SP's grants applied by the grant_volume_access job.
+  # wipe the app SP's grants, which are given by hand.
   schemas:
     latlang_schema:
       catalog_name: ${var.app_write_catalog}

@@ -8,7 +8,7 @@ shared Postgres project `LAKEBASE_PROJECT_ID`. Pipeline: `docs/pipeline.md`. Sch
 - **Claude has no Databricks access** (no CLI, workspace, UC or Lakebase). Never run or plan `databricks`/`bundle` commands
   yourself. Validate locally only (tests, build, YAML checks). Every step the user must run goes in the chat message, in
   full and in order (PowerShell, exact `bundle run` lines, SQL), and in `HANDOVER.md`, the single place for operating
-  steps. Never answer "see section X" or with a file path instead of the commands.
+  steps. The same steps, ready to copy, go in `runbooks/<env>.md` (not deployed, not mentioned in READMEs). Never answer "see section X" or with a file path instead of the commands.
 - Code the user asks for is ready to paste: no placeholder to edit, no widget to fill in.
 - **Deployment is manual for now**: `utils/deploy/deploy_latlang.ps1` with the user's own profile. There is no Bitbucket
   repository and no `job-runner-sa-<env>` deployment yet; do not write pipeline files that assume them.
@@ -36,8 +36,8 @@ shared Postgres project `LAKEBASE_PROJECT_ID`. Pipeline: `docs/pipeline.md`. Sch
 
 - `requirements.txt` at the root is what Databricks Apps installs (not `pyproject.toml`); its versions are exact pins.
 - Never declare `apps.*.resources` (`uc_securable`) in `databricks.yml`: Terraform then grants `USE CATALOG` to
-  `account users` and fails without catalog `MANAGE`. The app's own service principal is granted by the
-  `grant_volume_access` job, with `service_principal_client_id` (the `id` of `apps get`), not `oauth2_app_client_id`.
+  `account users` and fails without catalog `MANAGE`. The app's own service principal is granted by hand (SQL in
+  `HANDOVER.md` §3.4), with `service_principal_client_id` (the `id` of `apps get`), not `oauth2_app_client_id`.
 - A `resources.schemas|volumes|postgres_projects` block for an object another bundle (or target) already manages fails
   with "already exists" at deploy. `latlang-uat` shows the app as "not deployed" in `bundle summary` while it runs: check
   `bundle plan` before any `-Infra` deploy there.
@@ -45,8 +45,8 @@ shared Postgres project `LAKEBASE_PROJECT_ID`. Pipeline: `docs/pipeline.md`. Sch
   `bun install --frozen-lockfile`. Without it the app root answers 404 while `/api/*` works.
 - `render_target_config_env.py` writes `target_config.env` with LF; `.gitattributes` keeps `*.sh` in LF. A CRLF adds a
   `\r` to every value in the Linux container.
-- The grant job always gives READ and WRITE on the write volumes; a job created before the grant keeps a NULL
-  `input_volume_path` and must be recreated.
+- The app needs READ and WRITE on `documents`; a job created before the grant keeps a NULL `input_volume_path` and must
+  be recreated.
 - The bundle root is `/Workspace/Shared/.bundle/latlang/<target>`. Moving it moves the bundle state: it needs a copy of
   the state first.
 
