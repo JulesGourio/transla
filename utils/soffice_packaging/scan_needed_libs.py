@@ -9,9 +9,12 @@ package_libreoffice.py) or present in the target container.
 Usage: python scan_needed_libs.py <extracted_tree_dir>
 """
 
+import logging
 import struct
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Provided by any glibc-based image — never bundle these.
 _BASELINE = {
@@ -21,8 +24,12 @@ _BASELINE = {
 }
 
 
-def elf_needed(path: Path):
-    """Return the DT_NEEDED sonames of an ELF file (or None if not ELF)."""
+def elf_needed(path: Path) -> "list[str] | None":
+    """Read the DT_NEEDED sonames of an ELF file.
+
+    :param path: File to inspect.
+    :return: Sonames in dynamic-section order (empty without a dynamic section), or None if the file is not ELF.
+    """
     with open(path, 'rb') as f:
         ident = f.read(16)
         if len(ident) < 16 or ident[:4] != b'\x7fELF':
@@ -56,7 +63,7 @@ def elf_needed(path: Path):
         if not dynamic:
             return []
         sh_offset, sh_size, sh_link = dynamic
-        # linked string table section
+        # The dynamic section links to its string table section.
         s = sections[sh_link]
         if is64:
             str_off, str_size = struct.unpack_from(endian + 'QQ', s, 0x18)
@@ -80,6 +87,10 @@ def elf_needed(path: Path):
 
 
 def main(tree: str) -> None:
+    """Log the sonames the tree needs but neither provides nor inherits from glibc.
+
+    :param tree: Root of the extracted LibreOffice tree.
+    """
     root = Path(tree)
     provided, needed = set(), set()
     n_elf = 0
@@ -96,13 +107,14 @@ def main(tree: str) -> None:
         provided.add(p.name)
         needed.update(deps)
     missing = sorted(needed - provided - _BASELINE)
-    print(f'{n_elf} ELF files, {len(needed)} distinct NEEDED sonames')
-    print('missing (must exist in container or be bundled):')
+    logger.info('%d ELF files, %d distinct NEEDED sonames', n_elf, len(needed))
+    logger.info('missing (must exist in container or be bundled):')
     for so in missing:
-        print(f'  {so}')
+        logger.info('  %s', so)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     main(sys.argv[1])

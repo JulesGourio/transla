@@ -206,7 +206,7 @@ def _to_text(value: object) -> str:
     return str(value)
 
 
-def make_converter(spark_type: str):
+def make_converter(spark_type: str) -> "Callable[[object], object]":
     """Build the value converter for a Spark type.
 
     :param spark_type: Spark SQL type as returned by ``map_pg_type``.

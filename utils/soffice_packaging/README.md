@@ -43,7 +43,7 @@ python utils/soffice_packaging/scan_needed_libs.py <extracted_tree_dir>
 ```
 
 Reads the `DT_NEEDED` entries of every ELF file in the tree without `ldd` (so it runs on Windows), removes what the tree
-provides and the libraries every glibc container has, and prints the rest. Whatever it prints must be in
+provides and the libraries every glibc container has, and logs the rest. Whatever it prints must be in
 `_SYSLIB_PACKAGES` or in the container.
 
 The archive of the application carries Liberation, Carlito, Caladea, DejaVu and Noto fonts, Amiri and Noto Arabic

@@ -17,16 +17,18 @@ For CRITICAL segments (headers), suggests completely alternative translations.
 Usage:
     python length_adapt.py <extract.json> <translation.json> [--apply]
 
-Without --apply: prints suggestions only.
+Without --apply: logs suggestions only.
 With --apply: writes an updated translation.json with shortened text.
 """
 
 from __future__ import annotations
 import json
+import logging
 import re
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 # French aerospace abbreviation rules (ordered by priority)
 SHORTENINGS_FR = [
@@ -96,17 +98,20 @@ HEADER_ALTERNATIVES_BY_LANG: dict[str, dict[str, str]] = {
     "fr": HEADER_ALTERNATIVES_FR,
 }
 
-# Back-compat aliases for existing callers/tests (French was the only language before).
+# Aliases for callers and tests that use the French tables.
 SHORTENINGS = SHORTENINGS_FR
 HEADER_ALTERNATIVES = HEADER_ALTERNATIVES_FR
 
 
 def shorten(text: str, target_len: int, lang: str = "fr") -> tuple[str, list[str]]:
-    """Apply abbreviation rules to shorten text. Returns (shortened, rules_applied).
+    """Shorten a text with the abbreviation rules of a language.
 
-    Unlisted `lang` values resolve to an empty rule set (clean no-op) rather
-    than falling back to French, which would silently apply the wrong language's
-    phrasing.
+    A language without rules yields no change; French rules are never applied to another language.
+
+    :param text: translated text.
+    :param target_len: length in characters at which rule application stops.
+    :param lang: target language code.
+    :return: (shortened text, descriptions of the rules applied).
     """
     applied = []
     result = text
@@ -121,9 +126,19 @@ def shorten(text: str, target_len: int, lang: str = "fr") -> tuple[str, list[str
 
 
 def main(argv: list[str]) -> int:
+    """Suggest shorter translations for overflowing segments, optionally applying them.
+
+    :param argv: command-line arguments, program name first: --job <dir> or <extract.json> <translation.json>, with optional --apply and --target-lang <lang> (default "fr").
+    :return: 0 on success, 1 on bad usage.
+    """
     from job_utils import parse_job_flag, JobPaths
 
     def _pop_target_lang(args: list[str]) -> tuple[list[str], str]:
+        """Extract the --target-lang option from an argument list.
+
+        :param args: command-line arguments.
+        :return: (arguments without the option, language code; "fr" when absent).
+        """
         lang = "fr"
         rest = []
         i = 0
@@ -145,8 +160,8 @@ def main(argv: list[str]) -> int:
         apply_changes = "--apply" in remaining
     else:
         if len(remaining) < 2:
-            print("Usage: python length_adapt.py <extract.json> <translation.json> "
-                  "[--apply] [--target-lang <lang>]")
+            logger.error("Usage: python length_adapt.py <extract.json> <translation.json> "
+                         "[--apply] [--target-lang <lang>]")
             return 1
 
         extract_path = remaining[0]
@@ -185,7 +200,6 @@ def main(argv: list[str]) -> int:
         if ratio <= threshold:
             continue
 
-        # Try header alternatives first
         if loc in ("header", "footer"):
             alt = HEADER_ALTERNATIVES_BY_LANG.get(target_lang, {}).get(new_text.strip())
             if alt:
@@ -215,29 +229,28 @@ def main(argv: list[str]) -> int:
             tseg["translated_text"] = shortened
             changes += 1
 
-    # Report
     for s in suggestions:
         status = "FIXED" if s["fits"] else "STILL OVER"
-        print(f"[{status:10s}] {s['seg_id']} ({s['location']})")
-        print(f"  before ({s['before_len']:3d} chars): {s['before'][:100]}")
-        print(f"  after  ({s['after_len']:3d} chars): {s['after'][:100]}")
-        print(f"  target: ≤{s['orig_len']} chars | rules: {', '.join(s['rules']) or 'none'}")
-        print()
+        logger.info("[%-10s] %s (%s)", status, s["seg_id"], s["location"])
+        logger.info("  before (%3d chars): %s", s["before_len"], s["before"][:100])
+        logger.info("  after  (%3d chars): %s", s["after_len"], s["after"][:100])
+        logger.info("  target: ≤%d chars | rules: %s", s["orig_len"], ", ".join(s["rules"]) or "none")
 
     fixed = sum(1 for s in suggestions if s["fits"])
     still_over = sum(1 for s in suggestions if not s["fits"])
-    print(f"Total: {len(suggestions)} segments processed, "
-          f"{fixed} fixed, {still_over} still over threshold")
+    logger.info("Total: %d segments processed, %d fixed, %d still over threshold",
+                len(suggestions), fixed, still_over)
 
     if apply_changes and changes:
         Path(translation_path).write_text(
             json.dumps(translation, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        print(f"\nApplied {changes} changes to {translation_path}")
+        logger.info("Applied %d changes to %s", changes, translation_path)
 
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sys.exit(main(sys.argv))

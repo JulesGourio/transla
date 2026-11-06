@@ -22,6 +22,7 @@ utils/deploy/target_env.json.
 
 import gzip
 import io
+import logging
 import lzma
 import shutil
 import sys
@@ -29,14 +30,14 @@ import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Iterator
 
-# System libraries the TDF LibreOffice build links against that slim
-# container images (Databricks Apps) don't ship. Their .so files are merged
-# into program/ (covered by the executables' $ORIGIN rpath, plus
-# LD_LIBRARY_PATH set by server/services/soffice.py). Pulled from the Ubuntu
-# jammy (22.04) archive — the Databricks Apps base image generation; these
-# X/rendering libs have tiny, ancient glibc requirements, so a slightly
-# different container release is fine.
+logger = logging.getLogger(__name__)
+
+# System libraries the TDF LibreOffice build links against that slim container images do not ship. Their .so files
+# are merged into program/ (covered by the executables' $ORIGIN rpath and LD_LIBRARY_PATH). They come from the
+# Ubuntu jammy (22.04) archive, the Databricks Apps base image generation; their glibc requirements are old enough
+# for a slightly different container release.
 _SYSLIB_PACKAGES = [
     'libx11-6', 'libxcb1', 'libxau6', 'libxdmcp6', 'libxext6', 'libxinerama1',
     'libxrender1', 'libxrandr2', 'libxcursor1', 'libxfixes3', 'libxi6',
@@ -46,12 +47,10 @@ _SYSLIB_PACKAGES = [
     'libxcb-shm0', 'libxcb-render0', 'libavahi-client3', 'libavahi-common3',
     'libgssapi-krb5-2', 'libkrb5-3', 'libk5crypto3', 'libkrb5support0',
     'libcom-err2', 'libkeyutils1', 'libbrotli1',
-    # NSS crypto stack — soffice.bin links libnss3/libssl3 (the NSS one, not
-    # OpenSSL) directly; TDF does not bundle it.
+    # NSS crypto stack: soffice.bin links libnss3 directly and TDF does not bundle it.
     'libnss3', 'libnspr4', 'libsqlite3-0',
-    # Full transitive closure from utils/soffice_packaging/scan_needed_libs.py
-    # (pure-Python DT_NEEDED scan of the tree), minus GUI-plugin-only deps
-    # (Qt5/KF5/GTK3/GStreamer — never loaded with SAL_USE_VCLPLUGIN=svp):
+    # Transitive closure of the scan_needed_libs.py output, minus GUI-plugin-only deps
+    # (Qt5/KF5/GTK3/GStreamer are never loaded with SAL_USE_VCLPLUGIN=svp):
     'libssl3', 'libcrypt1', 'libbsd0', 'libmd0', 'libx11-xcb1', 'libffi8',
     'libmount1', 'libblkid1', 'libselinux1', 'libpcre3', 'libpcre2-8-0', 'libuuid1',
     'libgnutls30', 'libidn2-0', 'libunistring2', 'libtasn1-6', 'libnettle8',
@@ -62,8 +61,12 @@ _SYSLIB_PACKAGES = [
 _UBUNTU_MIRROR = 'http://archive.ubuntu.com/ubuntu'
 
 
-def iter_ar_members(data: bytes):
-    """Minimal ar(1) reader: yields (name, payload) for each member."""
+def iter_ar_members(data: bytes) -> "Iterator[tuple[str, bytes]]":
+    """Read the members of an ar(1) archive.
+
+    :param data: Whole archive content, starting with the ``!<arch>`` magic.
+    :return: Iterator of ``(member name without trailing slash, member payload)``.
+    """
     assert data[:8] == b'!<arch>\n', 'not an ar archive'
     off = 8
     while off < len(data):
@@ -78,6 +81,12 @@ def iter_ar_members(data: bytes):
 
 
 def extract_deb(deb_bytes: bytes, dest: Path) -> None:
+    """Extract the data tarball of a .deb into a directory.
+
+    :param deb_bytes: Content of the .deb file.
+    :param dest: Directory receiving the package files.
+    :raises RuntimeError: if the data member uses an unsupported compression or is missing.
+    """
     for name, payload in iter_ar_members(deb_bytes):
         if not name.startswith('data.tar'):
             continue
@@ -86,7 +95,7 @@ def extract_deb(deb_bytes: bytes, dest: Path) -> None:
         elif name.endswith('.gz') or name.endswith('.tar'):
             stream = io.BytesIO(payload)
         elif name.endswith('.zst'):
-            import zstandard  # Ubuntu jammy-updates debs are zstd: uv run --with zstandard
+            import zstandard  # jammy-updates debs are zstd-compressed
             stream = io.BytesIO(zstandard.ZstdDecompressor().decompress(payload, max_output_size=2**33))
         else:
             raise RuntimeError(f'unsupported data member {name}')
@@ -97,12 +106,14 @@ def extract_deb(deb_bytes: bytes, dest: Path) -> None:
 
 
 def _load_ubuntu_index() -> dict:
-    """package name -> pool Filename, from the jammy + jammy-updates indexes
-    (updates last so security-patched versions win)."""
+    """Read the Ubuntu package indexes.
+
+    :return: Mapping package name -> pool file name; jammy-updates is read last so patched versions win.
+    """
     filenames: dict = {}
     for dist in ('jammy', 'jammy-updates'):
         url = f'{_UBUNTU_MIRROR}/dists/{dist}/main/binary-amd64/Packages.gz'
-        print(f'fetching package index {url} …')
+        logger.info('fetching package index %s …', url)
         with urllib.request.urlopen(url, timeout=120) as resp:
             data = gzip.decompress(resp.read()).decode('utf-8', errors='replace')
         name = None
@@ -115,8 +126,11 @@ def _load_ubuntu_index() -> dict:
 
 
 def add_system_libs(rootfs_program_dir: Path) -> None:
-    """Download the _SYSLIB_PACKAGES debs and merge their shared objects into
-    the LibreOffice program/ directory."""
+    """Download the ``_SYSLIB_PACKAGES`` debs and merge their shared objects into the LibreOffice program/ directory.
+
+    :param rootfs_program_dir: The ``program/`` directory of the LibreOffice tree; existing files are kept.
+    :raises SystemExit: if a package is missing from the Ubuntu index.
+    """
     index = _load_ubuntu_index()
     missing = [p for p in _SYSLIB_PACKAGES if p not in index]
     if missing:
@@ -126,17 +140,13 @@ def add_system_libs(rootfs_program_dir: Path) -> None:
         tmp_path = Path(tmp)
         for pkg in _SYSLIB_PACKAGES:
             url = f'{_UBUNTU_MIRROR}/{index[pkg]}'
-            print(f'  syslib {pkg}: {url.rsplit("/", 1)[-1]}')
+            logger.info('  syslib %s: %s', pkg, url.rsplit('/', 1)[-1])
             with urllib.request.urlopen(url, timeout=120) as resp:
                 deb_bytes = resp.read()
             extract_deb(deb_bytes, tmp_path)
 
         count = 0
         for so in tmp_path.glob('**/*.so*'):
-            if not so.is_file() or so.is_symlink():
-                # tarfile extraction preserves symlinks as symlinks — resolve
-                # by copying the target under the link's own name below.
-                pass
             dest = rootfs_program_dir / so.name
             if dest.exists():
                 continue
@@ -148,10 +158,16 @@ def add_system_libs(rootfs_program_dir: Path) -> None:
             else:
                 shutil.copy2(so, dest)
                 count += 1
-        print(f'merged {count} system libraries into program/')
+        logger.info('merged %d system libraries into program/', count)
 
 
 def main(bundle_path: str, output_path: str) -> None:
+    """Build the portable LibreOffice archive.
+
+    :param bundle_path: Downloaded TDF ``LibreOffice_<ver>_Linux_x86-64_deb.tar.gz``.
+    :param output_path: Path of the ``.tar.gz`` to write.
+    :raises SystemExit: if the bundle has no .deb, not exactly one ``opt/libreoffice*`` tree, or no soffice binary.
+    """
     bundle = Path(bundle_path)
     output = Path(output_path)
     with tempfile.TemporaryDirectory(prefix='lo_pkg_') as tmp:
@@ -161,14 +177,14 @@ def main(bundle_path: str, output_path: str) -> None:
         debs_dir.mkdir()
         rootfs.mkdir()
 
-        print(f'extracting bundle {bundle} …')
+        logger.info('extracting bundle %s …', bundle)
         with tarfile.open(bundle) as tar:
             tar.extractall(debs_dir)
 
         debs = sorted(debs_dir.glob('**/*.deb'))
         if not debs:
             raise SystemExit('no .deb files found in bundle')
-        print(f'unpacking {len(debs)} debs …')
+        logger.info('unpacking %d debs …', len(debs))
         for deb in debs:
             extract_deb(deb.read_bytes(), rootfs)
 
@@ -183,12 +199,16 @@ def main(bundle_path: str, output_path: str) -> None:
 
         add_system_libs(lo_root / 'program')
 
-        print(f'building {output} …')
+        logger.info('building %s …', output)
         output.parent.mkdir(parents=True, exist_ok=True)
 
         def normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
-            # Windows loses POSIX modes; grant exec broadly — a doc-conversion
-            # sandbox binary tree, not a security boundary.
+            """Normalise the permissions and ownership of an archive member.
+
+            :param info: Member being added.
+            :return: The same member with mode 755 for files and directories and root ownership.
+            """
+            # Windows loses POSIX modes; exec is granted broadly on this conversion-only tree.
             info.mode = 0o755 if info.isdir() or info.isfile() else info.mode
             info.uname = info.gname = ''
             info.uid = info.gid = 0
@@ -197,11 +217,12 @@ def main(bundle_path: str, output_path: str) -> None:
         with tarfile.open(output, 'w:gz', compresslevel=6) as tar:
             tar.add(lo_root, arcname=lo_root.name, filter=normalize)
 
-        print(f'done: {output} ({output.stat().st_size / 1e6:.0f} MB)')
-        print('upload the archive to the binaries volume')
+        logger.info('done: %s (%.0f MB)', output, output.stat().st_size / 1e6)
+        logger.info('upload the archive to the binaries volume')
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) != 3:
         raise SystemExit(__doc__)
     main(sys.argv[1], sys.argv[2])
