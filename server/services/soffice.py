@@ -8,17 +8,16 @@ subprocess. That is what this module does. Discovery order:
 
 1. ``SOFFICE_PATH`` — explicit path to an existing ``soffice`` binary
    (local dev: Windows install, or any pre-provisioned binary).
-2. A previously extracted portable tree in the local extract dir (fast path
+2. An already extracted portable tree in the local extract dir (fast path
    after the first request following a restart).
 3. ``SOFFICE_ARCHIVE_VOLUME_PATH`` — UC Volume path of a portable
    LibreOffice ``.tar.gz`` (see utils/soffice_packaging/) to download and
    extract once per process lifetime.
 4. Well-known system locations (PATH, Program Files) — local dev fallback.
 
-Everything here is synchronous (subprocess + file IO); callers wrap calls in
-``asyncio.to_thread`` like the rest of the volume plumbing in translate.py.
-If no engine can be found the caller gets ``SofficeUnavailable`` with the
-reason — the preview endpoint then falls back to client-side docx-preview.
+Everything here is synchronous (subprocess + file IO); async callers wrap calls
+in ``asyncio.to_thread``. When no engine can be found, callers get
+``SofficeUnavailable`` carrying the reason.
 """
 
 import hashlib
@@ -32,12 +31,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 _CONVERT_TIMEOUT_S = int(os.getenv('SOFFICE_CONVERT_TIMEOUT_S', '180'))
-# Portable-tree extraction can take a while for a ~700 MB tree; one-time cost.
 _EXTRACT_TIMEOUT_HINT_S = 600
 
 # soffice is single-document-per-invocation here (isolated profiles), but each
@@ -51,7 +49,7 @@ _engine_version: Optional[str] = None
 
 
 class SofficeUnavailable(RuntimeError):
-    """No usable LibreOffice binary could be found/provisioned."""
+    """No usable LibreOffice binary could be found or provisioned."""
 
 
 class SofficeConversionError(RuntimeError):
@@ -59,10 +57,12 @@ class SofficeConversionError(RuntimeError):
 
 
 def _extract_root() -> Path:
+    """Return the local directory the portable archive is extracted into.
+
+    :return: A directory named after the archive basename, so a new archive filename forces a fresh extraction.
+    """
     base = Path(os.getenv('SOFFICE_EXTRACT_DIR', '') or (Path(tempfile.gettempdir()) / 'latlang_soffice'))
-    # Version the extract dir by archive basename: uploading a fixed archive
-    # under a new filename guarantees a fresh extraction even if /tmp survived
-    # the app restart (the old broken tree would otherwise be reused forever).
+    # Versioned by archive basename so a re-uploaded archive is never shadowed by a stale tree in /tmp.
     archive = os.getenv('SOFFICE_ARCHIVE_VOLUME_PATH', '').strip()
     if archive:
         stem = re.sub(r'[^A-Za-z0-9._-]', '_', archive.rsplit('/', 1)[-1]).removesuffix('.tar.gz')
@@ -71,18 +71,25 @@ def _extract_root() -> Path:
 
 
 def _cache_dir() -> Path:
+    """Return the on-disk PDF cache directory, creating it if needed.
+
+    :return: The cache directory.
+    """
     d = Path(tempfile.gettempdir()) / 'latlang_pdf_cache'
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _find_binary_in_tree(root: Path) -> Optional[Path]:
-    """Locate program/soffice inside an extracted portable tree."""
+    """Locate the soffice binary inside an extracted portable tree.
+
+    :param root: Extraction root.
+    :return: Path of ``program/soffice`` (``.com`` or ``.exe`` on Windows), or None when absent.
+    """
     for candidate in root.glob('**/program/soffice'):
         if candidate.is_file():
             return candidate
-    # Windows portable tree (local testing with an msiexec /a admin image).
-    # Prefer soffice.com (console subsystem — sane stdout/exit handling).
+    # Windows tree: soffice.com (console subsystem) has sane stdout/exit handling, so it is tried before .exe.
     for pattern in ('**/program/soffice.com', '**/program/soffice.exe'):
         for candidate in root.glob(pattern):
             if candidate.is_file():
@@ -91,6 +98,10 @@ def _find_binary_in_tree(root: Path) -> Optional[Path]:
 
 
 def _mark_executable(root: Path) -> None:
+    """Make the files under ``program/`` executable on POSIX systems.
+
+    :param root: Extraction root.
+    """
     if os.name == 'nt':
         return
     for p in root.glob('**/program/*'):
@@ -103,8 +114,11 @@ def _mark_executable(root: Path) -> None:
 def _extract_archive_from_volume(volume_path: str) -> Path:
     """Download the portable tar.gz from the UC Volume and extract it locally.
 
-    Runs at most once per process (marker file); a crashed half-extract is
-    detected by the missing marker and redone from scratch.
+    A marker file records a complete extraction; a tree without it is redone from scratch.
+
+    :param volume_path: UC Volume path of the ``.tar.gz`` archive.
+    :return: Path of the extracted soffice binary.
+    :raises SofficeUnavailable: When the archive contains no ``program/soffice``.
     """
     from databricks.sdk import WorkspaceClient
 
@@ -148,7 +162,11 @@ def _extract_archive_from_volume(volume_path: str) -> Path:
     return binary
 
 
-def _well_known_paths() -> list:
+def _well_known_paths() -> list[Path]:
+    """List the existing soffice binaries at standard system locations.
+
+    :return: Candidate binary paths, possibly empty.
+    """
     paths = []
     found = shutil.which('soffice')
     if found:
@@ -166,11 +184,12 @@ def _well_known_paths() -> list:
 
 
 def _probe_version(binary: str) -> Optional[str]:
-    """Run `soffice --headless --version`. Also serves as the executability
-    check — a present-but-unrunnable binary (noexec mount, missing shared
-    libs) fails here with a useful message instead of at first conversion.
-    Headless + isolated profile: without them, a pristine Windows soffice.exe
-    blocks on first-run profile/dialog handling."""
+    """Run ``soffice --headless --version`` with an isolated profile to check the binary is runnable.
+
+    :param binary: Path of the soffice binary.
+    :return: The first line of the version output, or ``'unknown version'`` when the binary prints nothing.
+    :raises SofficeUnavailable: When the binary fails, times out or cannot be executed.
+    """
     try:
         with tempfile.TemporaryDirectory(prefix='soffice_probe_') as tmp:
             profile = Path(tmp) / 'profile'
@@ -181,8 +200,7 @@ def _probe_version(binary: str) -> Optional[str]:
                 env=_subprocess_env(binary),
             )
             if out.returncode == 0:
-                # Windows soffice.exe is a GUI-subsystem binary: rc=0 but no
-                # console output. Success is rc=0; the version string is a bonus.
+                # Windows soffice.exe is GUI-subsystem: rc=0 with no console output.
                 return out.stdout.strip().splitlines()[0] if out.stdout.strip() else 'unknown version'
             raise SofficeUnavailable(
                 f'{binary} --version failed (rc={out.returncode}): {(out.stderr or out.stdout).strip()[:500]}'
@@ -191,16 +209,17 @@ def _probe_version(binary: str) -> Optional[str]:
         raise SofficeUnavailable(f'{binary} not runnable: {e}')
 
 
-def _subprocess_env(binary: Optional[str] = None) -> dict:
+def _subprocess_env(binary: Optional[str] = None) -> dict[str, str]:
+    """Build the environment for a soffice subprocess.
+
+    :param binary: Path of the soffice binary; when given on POSIX its ``program/`` dir is added to LD_LIBRARY_PATH.
+    :return: Environment variables.
+    """
     env = dict(os.environ)
-    # Headless-friendly defaults; harmless when already set.
     env.setdefault('HOME', tempfile.gettempdir())
     env.setdefault('SAL_USE_VCLPLUGIN', 'svp')  # pure-software rendering, no X11
     if binary and os.name != 'nt':
-        # The portable tarball carries the Ubuntu system libs LibreOffice
-        # needs but slim containers lack (libXinerama & co) inside program/.
-        # $ORIGIN rpath covers the executables; LD_LIBRARY_PATH covers
-        # anything dlopen'd through a different path.
+        # The portable tarball ships system libs that slim containers lack; LD_LIBRARY_PATH covers dlopen'd ones.
         program_dir = str(Path(binary).parent)
         env['LD_LIBRARY_PATH'] = program_dir + (
             ':' + env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else ''
@@ -209,7 +228,11 @@ def _subprocess_env(binary: Optional[str] = None) -> dict:
 
 
 def find_soffice() -> str:
-    """Resolve (once per process) the soffice binary path. Raises SofficeUnavailable."""
+    """Resolve the soffice binary path, caching it for the process lifetime.
+
+    :return: Path of the soffice binary.
+    :raises SofficeUnavailable: When no usable binary is found or provisioned.
+    """
     global _discovered_path, _discovery_error, _engine_version
     if _discovered_path:
         return _discovered_path
@@ -263,8 +286,11 @@ def find_soffice() -> str:
         return _discovered_path
 
 
-def soffice_status() -> dict:
-    """Non-raising status snapshot for the diagnostic endpoint."""
+def soffice_status() -> dict[str, Any]:
+    """Report soffice availability without raising.
+
+    :return: ``{'available': True, 'path', 'version'}`` or ``{'available': False, 'error'}``.
+    """
     try:
         path = find_soffice()
         return {'available': True, 'path': path, 'version': _engine_version}
@@ -273,12 +299,16 @@ def soffice_status() -> dict:
 
 
 def convert_docx_to_pdf(docx_bytes: bytes, timeout_s: int = _CONVERT_TIMEOUT_S, suffix: str = '.docx') -> bytes:
-    """Convert .docx (or any soffice-readable format — pass the real
-    extension via ``suffix``, soffice picks its import filter from it) to
-    PDF bytes.
+    """Convert a .docx (or any soffice-readable document) to PDF.
 
-    Results are cached on disk by content hash — the before/after preview of a
-    finished job is immutable, so repeat views cost nothing.
+    Results are cached on disk by content hash.
+
+    :param docx_bytes: Source document content.
+    :param timeout_s: Conversion timeout in seconds.
+    :param suffix: Real file extension of the source, from which soffice picks its import filter; the leading dot is optional.
+    :return: PDF content.
+    :raises SofficeUnavailable: When no soffice binary is available.
+    :raises SofficeConversionError: On timeout, a non-zero exit, or no PDF produced.
     """
     digest = hashlib.sha256(docx_bytes).hexdigest()
     cached = _cache_dir() / f'{digest}.pdf'
@@ -292,8 +322,7 @@ def convert_docx_to_pdf(docx_bytes: bytes, timeout_s: int = _CONVERT_TIMEOUT_S, 
             tmp_path = Path(tmp)
             src = tmp_path / f'input{suffix if suffix.startswith(".") else "." + suffix}'
             src.write_bytes(docx_bytes)
-            # Isolated profile per invocation — allows concurrent soffice
-            # processes and avoids the shared-profile lock file entirely.
+            # Isolated profile per invocation allows concurrent soffice processes without a shared lock file.
             profile = tmp_path / 'profile'
             profile.mkdir()
             cmd = [

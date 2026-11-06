@@ -1,9 +1,4 @@
-"""Translation pipeline adapter — Translate tab.
-
-Thin wrapper around the server/services/translation engine modules
-(segmentation, bilingual pairing, conflict detection, question generation),
-adapted to run in-memory against uploaded bytes instead of CLI file paths.
-"""
+"""Adapter running the translation engine modules in memory against uploaded document bytes."""
 
 import io
 import logging
@@ -25,12 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 def extract_docx_segments(docx_bytes: bytes) -> List[Dict[str, Any]]:
-    """Extract translatable segments from a bilingual .docx (in-memory).
+    """Extract the translatable segments of a .docx.
 
-    Reuses the engine's extract.py XML walk verbatim — it already
-    handles the tricky part (text boxes appear twice, in mc:Choice AND
-    mc:Fallback; both positional paths are recorded so rebuild can update
-    both), tables, and structured-document-tag containers.
+    Text boxes appear in both mc:Choice and mc:Fallback; both positional paths are recorded.
+
+    :param docx_bytes: Document content.
+    :return: Segment dicts in the engine's extract format.
     """
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
         text_parts = _extract.discover_text_parts(z.namelist())
@@ -47,41 +42,31 @@ def audit_segments(
     source_lang: str | None = None,
     target_lang: str | None = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Language-detect, bilingual-pair, and flag conflicts across segments;
-    generate the batched clarifying questions for ambiguous/conflicting ones.
+    """Detect languages, pair bilingual segments, flag conflicts and generate clarifying questions.
 
-    Mirrors the engine audit.py's main(), minus its file I/O. dnt_rows comes
-    from the Lakebase dnt_rules table (not the CSV file) — built into a
-    DntMatcher per call (never module state, so concurrent jobs can't share
-    one reviewer's rules) and applied live during DNT classification, on top
-    of the built-in DNT_REGEX (dates/part numbers/standards).
+    A DntMatcher is built per call from ``dnt_rows`` so concurrent jobs never share rules; the rules apply on top of the
+    built-in DNT_REGEX.
 
-    source_lang/target_lang are the user's declared pair. When given, language
-    detection is constrained to that pair (the ensemble detector) and the
-    document translation mode (monolingual vs bilingual) is determined — both
-    fed forward to the translation-planning stage.
+    :param segments: Segments from ``extract_docx_segments``.
+    :param dnt_rows: Do-not-translate rules from the ``dnt_rules`` table.
+    :param source_lang: Declared source language; with ``target_lang`` it constrains detection and selects the mode.
+    :param target_lang: Declared target language.
+    :return: ``(audit_report, questions)``; the report holds ``mode``, the detected languages, counts and one merged row per segment.
     """
     matcher = _glossary_io.DntMatcher(dnt_rows)
     audited = _audit.audit_all_segments(segments, matcher, source_lang, target_lang)
     mode = (_audit.determine_mode(audited, source_lang, target_lang)
             if source_lang and target_lang else "bilingual")
 
-    # Cross-paragraph/row/textbox pairing (and its conflict detection) only
-    # makes sense when two languages sit side by side. On a monolingual doc it
-    # fires on incidental false positives and invents bogus pairs/conflicts
-    # (measured on a real French doc: 18 spurious conflicts) — skip in mono.
+    # Pairing only makes sense when two languages sit side by side; on a monolingual document it invents bogus pairs.
     if mode == 'bilingual':
         pairer = _audit.Pairer()
         _audit.pair_txbx_siblings(audited, pairer)
         _audit.pair_adjacent_body(audited, pairer)
         _audit.pair_table_rows(audited, pairer)
 
-    # Inline splits (TWO languages concatenated in ONE segment/run — e.g. a
-    # Bulgarian sentence immediately followed by its English echo) run in BOTH
-    # modes: the source span must be translated and the other-language span
-    # kept even when the document as a whole is "monolingual" in the sense that
-    # the declared target never appears in it. This is the case that was
-    # silently left half-untranslated when inline splitting was mono-gated.
+    # Inline splits (two languages in one segment) run in both modes: the source span is translated and the other kept
+    # even when the declared target never appears elsewhere in the document.
     _audit.pair_inline_slash(audited)
     _audit.pair_inline_format_concat(audited)
     _audit.pair_inline_charspan(audited)
@@ -105,10 +90,7 @@ def audit_segments(
         audited, primary_lang, secondary_lang, source_file='', mode=mode,
     )
 
-    # make_audited/strip_internal keep only the audit fields — the CLI reads
-    # part/location/XML paths from its separate extract.json, but the web
-    # pipeline persists ONE row per segment and the rebuild stage needs those
-    # fields to know where to write each translation. Merge them back in.
+    # strip_internal keeps only audit fields; rebuild needs part/location/XML paths from the extract to place each translation.
     ext_by_id = {s['seg_id']: s for s in segments}
     merged = []
     for s in audited:
@@ -141,9 +123,13 @@ def check_fit(
     translated_segments: List[Dict[str, Any]],
     threshold_override: int | None = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Flag segments whose translated text is likely to overflow its
-    container. Mirrors the engine fit_check.py's main(), minus its
-    file I/O. Returns (flagged, critical_count)."""
+    """Flag segments whose translated text is likely to overflow its container.
+
+    :param extract_segments: Segments from extraction, giving each one's part and location type.
+    :param translated_segments: Dicts with ``seg_id``, ``original_text``, ``translated_text``, ``keep_as_is`` and ``inline_split``.
+    :param threshold_override: Length ratio in percent replacing the per-location threshold.
+    :return: ``(flagged, critical_count)``; flagged items are sorted by severity, then by descending ratio.
+    """
     ext_by_id = {s['seg_id']: s for s in extract_segments}
     flagged: List[Dict[str, Any]] = []
     critical = 0
@@ -160,10 +146,7 @@ def check_fit(
             continue
         inline_split = tseg.get('inline_split')
         if inline_split and inline_split.get('span_translated'):
-            # Format-kind bilingual segment: translated_text holds only the
-            # source-side span (the kept side stays in its own runs), so the
-            # rendered length is kept-side + span translation, not the span
-            # alone.
+            # translated_text holds only the source-side span; the rendered length adds the kept side.
             new_len += orig_len - inline_split.get('source_span_len', 0)
         ratio = (new_len / orig_len) * 100
         loc = _fit_check.classify_location(seg_id, ext['location_type'], ext['part'])
@@ -189,10 +172,15 @@ def adapt_lengths(
     translated_segments: List[Dict[str, Any]],
     target_lang: str = "fr",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Shorten overflowing translations using per-language abbreviation
-    rules (see length_adapt.SHORTENINGS_BY_LANG). Mutates translated_segments'
-    translated_text in place (matching length_adapt.py's --apply behaviour)
-    and returns (translated_segments, suggestions)."""
+    """Shorten overflowing translations with the target language's abbreviation rules.
+
+    ``translated_text`` of the given segments is replaced in place.
+
+    :param extract_segments: Segments from extraction, giving each one's part and location type.
+    :param translated_segments: Dicts with ``seg_id``, ``original_text``, ``translated_text``, ``keep_as_is`` and ``inline_split``.
+    :param target_lang: Target language code selecting the abbreviation rules.
+    :return: ``(translated_segments, suggestions)``; each suggestion records the before/after text and whether it now fits.
+    """
     ext_by_id = {s['seg_id']: s for s in extract_segments}
     thresholds = {'header': 100, 'footer': 100, 'txbx': 130, 'table': 150}
     suggestions: List[Dict[str, Any]] = []
@@ -201,8 +189,7 @@ def adapt_lengths(
             continue
         inline_split = tseg.get('inline_split')
         if inline_split and inline_split.get('span_translated'):
-            # Span-only translation (format-kind bilingual segment): the
-            # orig_len-based shortening targets below would mis-size it.
+            # Span-only translation: length targets derived from orig_len would mis-size it.
             continue
         seg_id = tseg['seg_id']
         ext = ext_by_id.get(seg_id)
@@ -247,12 +234,11 @@ def adapt_lengths(
 # ---------------------------------------------------------------------------
 
 def build_rebuild_inputs(segments: List[Dict[str, Any]]) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
-    """Group DB-shaped translation_segments rows by XML part and build the
-    per-segment metadata dicts rebuild.apply_translations_lxml() expects.
+    """Group segment rows by XML part and build the per-segment metadata the rebuild expects.
 
-    `segments` items carry (already JSON-decoded): seg_id, part,
-    xml_choice_path, xml_fallback_path, pattern_type, inline_split,
-    translated_text, keep_as_is, original_text (source_text).
+    :param segments: JSON-decoded rows with ``seg_id``, ``part``, ``xml_choice_path``, ``xml_fallback_path``,
+        ``pattern_type``, ``inline_split``, ``translated_text``, ``keep_as_is`` and ``original_text``.
+    :return: ``(translations_by_part, metadata)``.
     """
     translations_by_part: Dict[str, List[dict]] = {}
     metadata: Dict[str, Any] = {
@@ -279,12 +265,14 @@ def rebuild_docx_bytes(
     translations_by_part: Dict[str, List[dict]],
     metadata: Dict[str, Any],
 ) -> bytes:
-    """Rebuild a translated .docx in-memory. Mirrors the engine
-    rebuild.py's rebuild_docx(), operating on bytes instead of file paths
-    (a web job has no local filesystem for intermediate files). Reuses
-    apply_translations_lxml verbatim — lxml preserves namespace declarations
-    and attribute formatting byte-for-byte, which is the part that matters
-    for Word to accept the file.
+    """Write translations into a copy of the source .docx.
+
+    lxml keeps namespace declarations and attribute formatting byte-for-byte, which Word requires.
+
+    :param src_bytes: Source document content.
+    :param translations_by_part: Translations grouped by XML part, from ``build_rebuild_inputs``.
+    :param metadata: Per-segment metadata, from ``build_rebuild_inputs``.
+    :return: The rebuilt document content.
     """
     from lxml import etree as lxml_etree
 
@@ -324,14 +312,21 @@ def rebuild_docx_bytes(
 
 
 def find_unplaced_translations(rebuilt_bytes: bytes, rows: List[Dict[str, Any]]) -> List[str]:
-    """seg_ids whose translation is not what the rebuilt document now says.
+    """Find segments whose translation is not what the rebuilt document says.
 
-    rebuild applies each translation by walking a stored XML path; a path that no
-    longer resolves, or a paragraph with no <w:t> to write into, is skipped
-    silently (the 'applied n/m' log even counts it) and the paragraph stays in the
-    source language with no flag anywhere. Re-reading the output and comparing it
-    with what was meant to be written is the only check that sees this."""
+    A translation whose XML path no longer resolves, or whose paragraph has no ``<w:t>``, is skipped silently by the
+    rebuild; only re-reading the output reveals it. Whitespace and XML-illegal characters are ignored in the comparison.
+
+    :param rebuilt_bytes: Rebuilt document content.
+    :param rows: Segment rows with ``seg_id``, ``translated_text``, ``keep_as_is`` and ``inline_split``.
+    :return: Ids of the segments whose translation did not land.
+    """
     def norm(text: str) -> str:
+        """Normalise text for comparison.
+
+        :param text: Raw text.
+        :return: The text without XML-illegal characters and with whitespace collapsed to single spaces.
+        """
         return ' '.join(_rebuild._XML_ILLEGAL_RE.sub('', text).split())
 
     actual = {s['seg_id']: norm(s['text']) for s in extract_docx_segments(rebuilt_bytes)}
@@ -353,18 +348,21 @@ def find_unplaced_translations(rebuilt_bytes: bytes, rows: List[Dict[str, Any]])
 # ---------------------------------------------------------------------------
 
 def _check_segment_fidelity_bytes(new_bytes: bytes, reference_segments: List[Dict[str, Any]]) -> List[str]:
-    """word/comments.xml is excluded from this comparison: when the caller
-    asked for include_review_comments, inject_comments() (comments.py)
-    appends real Word comments to it as an intentional part of THIS rebuild
-    — extraction now picks those up as new segments (see extract.py's
-    NOTE_WRAPPER_TAGS), which would otherwise look like accidental content
-    drift to a check meant to catch lost/duplicated body content.
+    """Compare the segment ids of a rebuilt document with the reference.
 
-    Same reasoning for the docx_images.py image-translation paragraphs —
-    intentional growth, just identified by their IMAGE_TRANSLATION_MARKER
-    prefix instead of a separate XML part, since they live in
-    word/document.xml itself."""
+    Segments of ``word/comments.xml`` and paragraphs starting with the image-translation marker are ignored: both are
+    added deliberately by the rebuild.
+
+    :param new_bytes: Rebuilt document content.
+    :param reference_segments: Segments extracted from the source document.
+    :return: Error messages; empty when the ids and the count match.
+    """
     def _is_excluded(s: Dict[str, Any]) -> bool:
+        """Tell whether a segment is excluded from the comparison.
+
+        :param s: Segment dict with ``part`` and ``text``.
+        :return: True for comment-part segments and image-translation paragraphs.
+        """
         return s['part'] == 'word/comments.xml' or s['text'].lstrip().startswith(_IMAGE_TRANSLATION_MARKER)
 
     errors = []
@@ -384,11 +382,14 @@ def _check_segment_fidelity_bytes(new_bytes: bytes, reference_segments: List[Dic
 
 
 def _check_byte_identity_bytes(new_bytes: bytes, original_bytes: bytes) -> List[str]:
+    """Check that parts the rebuild must not touch are byte-identical to the original.
+
+    :param new_bytes: Rebuilt document content.
+    :param original_bytes: Source document content.
+    :return: One error per differing part; empty when all match.
+    """
     errors = []
-    # word/endnotes.xml and word/footnotes.xml are deliberately NOT in this
-    # set: extract.py now translates their paragraphs (NOTE_WRAPPER_TAGS), so
-    # they legitimately change during rebuild — asserting byte-identity here
-    # would fail every job that actually has footnote/endnote content.
+    # Footnotes and endnotes are excluded: their paragraphs are translated, so they legitimately change.
     immutable = {
         'word/styles.xml', 'word/settings.xml', 'word/fontTable.xml',
         'word/webSettings.xml', 'word/numbering.xml', 'word/theme/theme1.xml',
@@ -408,16 +409,21 @@ _RESIDUAL_UNIQUE_CHARS = {
     'bg': None,  # Cyrillic block check instead
     'de': set('ßÄÖÜäöü'),
     'es': set('ñÑ¿¡'),
-    'pt': set('ãõÃÕ'),  # nasal vowels, not used by any other language in scope
+    'pt': set('ãõÃÕ'),  # nasal vowels, used by no other language in scope
     'ar': None,  # Arabic block check instead — own script, like bg's Cyrillic
 }
 
 
 def _reads_as_script(text: str, lo: str, hi: str) -> bool:
-    """True when the text is still made of words in this script — not merely
-    containing some of its characters. Counting characters flagged already
-    translated segments that only kept a code with a Cyrillic look-alike
-    ("М8х1,25", "ОР50") or a proper noun left as-is per the prompt's rules."""
+    """Tell whether text is made of words in a script, not merely containing some of its characters.
+
+    Codes with a look-alike letter ("М8х1,25") and lone proper nouns do not count.
+
+    :param text: Text to test.
+    :param lo: First character of the script's code point range.
+    :param hi: Last character of the script's code point range.
+    :return: True when the text's words are mostly written in the script.
+    """
     words = re.findall(r'[^\W\d_]{2,}', text)
     native = [w for w in words if len(w) >= 3 and all(lo <= c <= hi for c in w)]
     if len(words) == 1:
@@ -426,23 +432,19 @@ def _reads_as_script(text: str, lo: str, hi: str) -> bool:
 
 
 def _check_residual_source_language_bytes(new_bytes: bytes, source_lang: str) -> List[Dict[str, Any]]:
-    """Return the segments in the rebuilt document that still read as the
-    source language — a QUALITY signal, not a hard failure. Each item is
-    {seg_id, text, detected_lang, confidence} so the UI can render an
-    actionable list (jump to the segment, edit it) instead of a wall of
-    truncated strings."""
+    """Find the segments of a rebuilt document that still read as the source language.
+
+    This is a quality signal, not a failure.
+
+    :param new_bytes: Rebuilt document content.
+    :param source_lang: Source language code.
+    :return: Items ``{seg_id, text, detected_lang, confidence}``; ``confidence`` is None when found by script or character.
+    """
     segments = extract_docx_segments(new_bytes)
     unique_chars = _RESIDUAL_UNIQUE_CHARS.get(source_lang)
-    # unique_chars alone has real blind spots — measured 2026-08-24: a genuine
-    # Czech word like "propojeni" (accents shared with other languages, no
-    # cs-exclusive character) never matches it and was silently invisible to
-    # this whole check. Falls back to the same constrained ensemble detector
-    # the audit stage uses (case-folded fastText — see _fasttext_scores) for
-    # anything the character shortcut doesn't catch. Deliberately NOT passing
-    # source_lang (which would engage the audit stage's single-ambiguous-word
-    # bias toward source_lang) — that bias is right for "should this be
-    # translated" but would flood this confirmation view with false
-    # positives on ordinary short kept-as-is words.
+    # Source-exclusive characters miss words whose accents are shared with other languages, so the constrained detector
+    # backs them up. source_lang is deliberately not passed to it: its single-word bias toward source_lang would flag
+    # ordinary short words kept as-is.
     candidates = {source_lang, 'en', 'fr', 'de', 'es', 'cs', 'bg', 'pt', 'ar'}
     items: List[Dict[str, Any]] = []
     for s in segments:
@@ -476,13 +478,13 @@ def validate_docx(
     reference_segments: List[Dict[str, Any]] | None = None,
     source_lang: str | None = None,
 ) -> Dict[str, Any]:
-    """Run the 8-check validation suite against a rebuilt .docx (in-memory).
+    """Run the validation suite against a rebuilt .docx.
 
-    Checks 1-5 reuse the engine validate.py's functions verbatim —
-    zipfile.ZipFile accepts a BytesIO exactly like a path, so no adaptation
-    was needed for those. Checks 6-8 need actual bytes (not a path) so
-    they're reimplemented here, reusing extract_docx_segments() instead of
-    validate.py's tempfile-based extract-to-disk round trip.
+    :param new_bytes: Rebuilt document content.
+    :param original_bytes: Source document content; enables the byte-identity check.
+    :param reference_segments: Segments of the source document; enables the segment-fidelity check.
+    :param source_lang: Source language code; enables the residual-source-language check.
+    :return: One ``{'passed', 'errors'}`` entry per check (residual_source_language also has ``items``), plus ``all_passed``.
     """
     checks: List[Tuple[str, List[str]]] = [
         ('zip_integrity', _validate.check_zip_integrity(io.BytesIO(new_bytes))),
@@ -498,9 +500,7 @@ def validate_docx(
 
     results: Dict[str, Any] = {name: {'passed': len(errs) == 0, 'errors': errs} for name, errs in checks}
 
-    # residual_source_language is a QUALITY signal (structured list of the
-    # still-source-language segments), handled apart from the string-list
-    # structural checks so the UI can render it actionably.
+    # residual_source_language is a quality signal with structured items, kept apart from the string-list structural checks.
     if source_lang:
         items = _check_residual_source_language_bytes(new_bytes, source_lang)
         errs = ([f'{len(items)} segments still contain {source_lang.upper()} text']

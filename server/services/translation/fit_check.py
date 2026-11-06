@@ -27,9 +27,11 @@ Exit code: 0 if no critical overflows, 1 if header/footer overflow detected.
 
 from __future__ import annotations
 import json
+import logging
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
 
 # Threshold defaults (% of original length)
 THRESHOLDS = {
@@ -52,7 +54,13 @@ SEVERITY = {
 
 
 def classify_location(seg_id: str, location_type: str, part: str) -> str:
-    """Map a segment to its overflow-sensitivity category."""
+    """Map a segment to its overflow-sensitivity category.
+
+    :param seg_id: segment id (unused, kept for call compatibility).
+    :param location_type: the segment's location type ("body_direct", "table", "txbx", "sdt").
+    :param part: XML part name; headers and footers override the location type.
+    :return: "header", "footer" or the location type.
+    """
     if "header" in part:
         return "header"
     if "footer" in part:
@@ -61,27 +69,30 @@ def classify_location(seg_id: str, location_type: str, part: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    """Run the fit check from the command line and log the report.
+
+    :param argv: command-line arguments, program name first: either --job <dir> or <extract.json> <translation.json>, with an optional --threshold N (percent of the original length).
+    :return: 0 when no critical overflow was found, 1 on a header/footer overflow or bad usage.
+    """
     from job_utils import parse_job_flag, JobPaths
     job_dir, remaining = parse_job_flag(argv[1:])
     if job_dir:
         jp = JobPaths(job_dir)
         extract_path = str(jp.extract_json)
         translation_path = str(jp.translation_json)
-        # Allow additional flags (e.g. --threshold) from remaining args
         custom_threshold = None
         for i, a in enumerate(remaining):
             if a == "--threshold" and i + 1 < len(remaining):
                 custom_threshold = int(remaining[i + 1])
     else:
         if len(argv) < 3:
-            print("Usage: python fit_check.py <extract.json> <translation.json> "
-                  "[--threshold N]")
+            logger.error("Usage: python fit_check.py <extract.json> <translation.json> "
+                         "[--threshold N]")
             return 1
 
         extract_path = argv[1]
         translation_path = argv[2]
 
-        # Optional global threshold override
         custom_threshold = None
         for i, a in enumerate(argv):
             if a == "--threshold" and i + 1 < len(argv):
@@ -127,37 +138,34 @@ def main(argv: list[str]) -> int:
             if severity == "CRITICAL":
                 critical += 1
 
-    # Sort by severity then ratio
     sev_order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
     flagged.sort(key=lambda f: (sev_order.get(f["severity"], 9), -f["ratio"]))
 
-    # Report
-    print(f"Fit check: {len(translation['segments'])} segments analyzed")
-    print(f"Flagged: {len(flagged)} overflow risks "
-          f"({critical} critical, "
-          f"{sum(1 for f in flagged if f['severity']=='WARNING')} warnings, "
-          f"{sum(1 for f in flagged if f['severity']=='INFO')} info)")
-    print()
+    logger.info("Fit check: %d segments analyzed", len(translation["segments"]))
+    logger.info("Flagged: %d overflow risks (%d critical, %d warnings, %d info)",
+                len(flagged), critical,
+                sum(1 for f in flagged if f["severity"] == "WARNING"),
+                sum(1 for f in flagged if f["severity"] == "INFO"))
 
     if not flagged:
-        print("No overflow risks detected.")
+        logger.info("No overflow risks detected.")
         return 0
 
     for f in flagged:
-        print(f"  [{f['severity']:8s}] {f['seg_id']}")
-        print(f"           {f['location']} | {f['orig_len']}→{f['new_len']} chars "
-              f"({f['ratio']}% of original, threshold {f['threshold']}%)")
-        print(f"           orig: {f['original_text']}")
-        print(f"           new:  {f['translated_text']}")
-        print()
+        logger.info("[%-8s] %s", f["severity"], f["seg_id"])
+        logger.info("         %s | %s→%s chars (%s%% of original, threshold %s%%)",
+                    f["location"], f["orig_len"], f["new_len"], f["ratio"], f["threshold"])
+        logger.info("         orig: %s", f["original_text"])
+        logger.info("         new:  %s", f["translated_text"])
 
     if critical > 0:
-        print(f"CRITICAL: {critical} header/footer overflow(s) detected. "
-              f"These WILL cause layout issues (line wrapping, page inflation).")
-        print("Fix: use shorter translations for header/footer text.")
+        logger.error("CRITICAL: %d header/footer overflow(s) detected. "
+                     "These WILL cause layout issues (line wrapping, page inflation).", critical)
+        logger.error("Fix: use shorter translations for header/footer text.")
         return 1
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sys.exit(main(sys.argv))

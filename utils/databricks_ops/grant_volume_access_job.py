@@ -2,22 +2,25 @@
 # MAGIC %md
 # MAGIC # Grant Volume Access
 # MAGIC
-# MAGIC One-off admin utility: grants USE CATALOG + USE SCHEMA, READ VOLUME on
-# MAGIC `read_volumes` and READ + WRITE VOLUME on `write_volumes` to a service principal. Copied from latec-compare's
-# MAGIC identical script (same pattern: run_as a service principal that already
-# MAGIC has grant authority on the target catalog).
+# MAGIC Admin utility: grants USE CATALOG + USE SCHEMA, READ VOLUME on
+# MAGIC `read_volumes` and READ + WRITE VOLUME on `write_volumes` to a service
+# MAGIC principal. It runs as a service principal that already has grant
+# MAGIC authority on the target catalog.
 # MAGIC
-# MAGIC Use case here: declaring a bundle `apps.*.resources` uc_securable block
-# MAGIC makes Terraform try to auto-grant USE CATALOG to `account users`, which
-# MAGIC fails unless the deploying user has MANAGE on the catalog. This job
-# MAGIC grants the app's own service principal directly instead, after the app
-# MAGIC has been created without that resources block.
+# MAGIC The app's own service principal is granted directly, because a bundle
+# MAGIC `apps.*.resources` uc_securable block would make Terraform auto-grant
+# MAGIC USE CATALOG to `account users`, which needs MANAGE on the catalog.
 # MAGIC
 # MAGIC If `run_as` also lacks GRANT rights on the target catalog, this job fails
 # MAGIC with the same PERMISSION_DENIED the target service principal hits — a job
 # MAGIC can't manufacture a privilege `run_as` doesn't already have.
 
 # COMMAND ----------
+
+"""Notebook entry point that grants a service principal access to Unity Catalog volumes."""
+import logging
+
+logger = logging.getLogger(__name__)
 
 dbutils.widgets.text("service_principal", "", "Service principal client id (or account) to grant")
 dbutils.widgets.text("catalog", "", "Catalog (e.g. uat_proj)")
@@ -51,10 +54,10 @@ failed = []
 for stmt in statements:
     try:
         spark.sql(stmt)
-        print(f"  OK: {stmt}")
+        logger.info("  OK: %s", stmt)
     except Exception as exc:
         failed.append((stmt, str(exc).splitlines()[0][:300]))
-        print(f"  FAILED: {stmt}\n    -> {str(exc).splitlines()[0][:300]}")
+        logger.error("  FAILED: %s\n    -> %s", stmt, str(exc).splitlines()[0][:300])
 
 if failed:
     raise RuntimeError(
@@ -63,4 +66,4 @@ if failed:
         f"metastore/catalog admin needs to run this instead."
     )
 
-print("All grants applied successfully.")
+logger.info("All grants applied successfully.")

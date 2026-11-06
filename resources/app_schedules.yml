@@ -1,0 +1,80 @@
+# Weekday start/stop of the app: it stays RUNNING 08:00-19:00 Europe/Paris, Monday to Friday, to save cost.
+# Notebook: utils/databricks_ops/app_lifecycle_job.py. UAT only: the DEV app is started by hand, PROD has no schedule yet.
+# The run_as service principal holds CAN_MANAGE on the app (databricks.yml).
+
+targets:
+  latlang-uat:
+    resources:
+      jobs:
+        start_app:
+          name: "WD_0_latlang_start_app_${bundle.target}"
+          description: "Starts the latlang app every weekday morning."
+          max_concurrent_runs: 1
+          queue:
+            enabled: true
+          email_notifications:
+            on_failure:
+              - ${var.notification_email}
+          notification_settings:
+            no_alert_for_canceled_runs: true
+          tags:
+            activity-type: ${var.job_activity_tag}
+            job-purpose: app-start
+            project-name: latlang
+          run_as:
+            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
+          schedule:
+            quartz_cron_expression: "0 0 8 ? * MON-FRI"
+            timezone_id: "Europe/Paris"
+            pause_status: UNPAUSED
+          tasks:
+            - task_key: start_app
+              notebook_task:
+                notebook_path: ../utils/databricks_ops/app_lifecycle_job.py
+                source: WORKSPACE
+                base_parameters:
+                  app_name: ${var.app_name}
+                  action: start
+              environment_key: default
+          environments:
+            - environment_key: default
+              spec:
+                environment_version: "2"
+                dependencies:
+                  - databricks-sdk>=0.118.0
+        stop_app:
+          name: "WD_1_latlang_stop_app_${bundle.target}"
+          description: "Stops the latlang app every weekday evening."
+          max_concurrent_runs: 1
+          queue:
+            enabled: true
+          email_notifications:
+            on_failure:
+              - ${var.notification_email}
+          notification_settings:
+            no_alert_for_canceled_runs: true
+          tags:
+            activity-type: ${var.job_activity_tag}
+            job-purpose: app-stop
+            project-name: latlang
+          run_as:
+            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
+          schedule:
+            quartz_cron_expression: "0 0 19 ? * MON-FRI"
+            timezone_id: "Europe/Paris"
+            pause_status: UNPAUSED
+          tasks:
+            - task_key: stop_app
+              notebook_task:
+                notebook_path: ../utils/databricks_ops/app_lifecycle_job.py
+                source: WORKSPACE
+                base_parameters:
+                  app_name: ${var.app_name}
+                  action: stop
+              environment_key: default
+          environments:
+            - environment_key: default
+              spec:
+                environment_version: "2"
+                dependencies:
+                  - databricks-sdk>=0.118.0

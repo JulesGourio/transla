@@ -15,8 +15,11 @@ Coût : une requête SQL (aucun LLM).
 """
 
 import argparse
+import logging
 
 from ._sql import CHUNKS_TABLE, run_sql
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TERMS = [
     'lexique', 'glossaire', 'glossary', 'définitions', 'definitions',
@@ -26,6 +29,7 @@ DEFAULT_TERMS = [
 
 
 def main() -> None:
+    """Command-line entry point: list chunks whose headers look like an index or glossary section."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--terms', help='libellés à chercher, séparés par des virgules')
     ap.add_argument('--limit', type=int, default=40)
@@ -42,16 +46,17 @@ def main() -> None:
         ORDER BY REF
         LIMIT {args.limit}
     """)
-    print(f'{len(rows)} chunk(s) avec une section index/lexique (en-têtes) :')
+    logger.info('%d chunk(s) avec une section index/lexique (en-têtes) :', len(rows))
     seen_refs = set()
     for ref, division, headers, excerpt in rows:
         marker = '' if ref in seen_refs else ' *'
         seen_refs.add(ref)
-        print(f'  [{division}] {ref}{marker}')
-        print(f'      headers: {str(headers)[:100]}')
-        print(f'      texte  : {str(excerpt)[:100]!r}')
-    print(f'\n{len(seen_refs)} document(s) distincts — candidats à une extraction d entrées de lexique.')
+        logger.info('  [%s] %s%s', division, ref, marker)
+        logger.info('      headers: %s', str(headers)[:100])
+        logger.info('      texte  : %r', str(excerpt)[:100])
+    logger.info('\n%d document(s) distincts — candidats à une extraction d entrées de lexique.', len(seen_refs))
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

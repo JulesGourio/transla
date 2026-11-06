@@ -1,14 +1,9 @@
-"""Job-driven glossary candidate extraction — the standard way the glossary
-grows going forward. The offline Intraqual corpus import
-(utils/glossary/{build_review_batch,sync_candidates_to_lakebase,promote_pending_candidates}.py)
-is a one-time supplementary bootstrap; it stays, but is not this.
+"""Job-driven glossary candidate extraction.
 
-A validated job proposes term candidates and a human reviews them: "propose"
-is an LLM extraction over the job's own source->target segment pairs (a
-translation a human has reviewed via the Q&A and the preview), and "confirm"
-is the glossary_candidates pending-review queue (GlossaryPanel.tsx).
-Candidates land at status='pending' — never auto-published like the corpus
-bootstrap, human validation stays the standard gate.
+A validated job proposes term candidates by LLM extraction over its own
+source->target segment pairs, and a human confirms them through the
+glossary_candidates pending-review queue. Candidates land at status='pending'
+and are never auto-published.
 """
 from __future__ import annotations
 
@@ -22,11 +17,11 @@ LANGS = ('en', 'fr', 'cs', 'bg', 'de', 'es', 'pt', 'ar')
 
 
 def normalize_term(term: str) -> str:
-    """Same normalization as utils/glossary/build_review_batch.py's _norm —
-    kept as an independent copy rather than importing across the
-    dev-tooling/runtime boundary (utils/ scripts assume a CLI environment:
-    `databricks auth token` subprocess calls, sys.path insertion — not
-    something the deployed app should depend on)."""
+    """Normalize a glossary term for comparison: lowercase, trimmed, accents removed.
+
+    :param term: raw term.
+    :return: normalized term.
+    """
     t = unicodedata.normalize('NFKD', term.lower().strip())
     return ''.join(c for c in t if not unicodedata.combining(c))
 
@@ -52,14 +47,18 @@ async def extract_job_candidates(
     endpoint: str,
     max_pairs: int = 40,
 ) -> list[dict[str, str]]:
-    """pairs: (source_text, translated_text) for segments actually translated
-    in one job (whole-segment translations only — see caller). Returns
-    candidate {source_lang: term, target_lang: term} dicts.
+    """Propose glossary term pairs from the translated segments of one job, using an LLM.
 
-    Deduplicates and ranks by repeat count first: a job can have hundreds of
-    segments (too many to put in one prompt), and a phrase recurring several
-    times within the SAME job is the strongest signal it's a real term worth
-    proposing, not a one-off sentence fragment.
+    Pairs are deduplicated and ranked by repeat count first, so only the most frequent ones fit the prompt; a phrase recurring within the job is the strongest sign of a real term.
+
+    :param pairs: (source_text, translated_text) of segments translated as a whole.
+    :param source_lang: source language code.
+    :param target_lang: target language code.
+    :param host: Databricks workspace host.
+    :param token: access token for the LLM endpoint.
+    :param endpoint: serving endpoint name.
+    :param max_pairs: maximum number of distinct pairs sent to the LLM.
+    :return: candidate dicts {source_lang: term, target_lang: term}; empty when there are no pairs.
     """
     counts = Counter(pairs)
     top = [p for p, _n in counts.most_common(max_pairs)]

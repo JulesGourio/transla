@@ -1,21 +1,22 @@
-"""LLM verification pass for glossary term-pair candidates — catches
-extraction artifacts (a document heading mistaken for a term, a sentence
-fragment, a chunk-misalignment pairing two unrelated words) and normalizes
-stray casing before a candidate is trusted. Shared by both glossary
-pipelines: the offline corpus sync (utils/glossary/sync_candidates_to_lakebase.py)
-and the per-job pipeline (server/routers/translate.py::_propose_glossary_candidates).
+"""LLM verification pass for glossary term-pair candidates.
 
-Synchronous/blocking (plain httpx calls with retry sleeps) since that's how
-it was written for the offline CLI script — async callers must run it via
+Catches extraction artifacts (a heading mistaken for a term, a sentence
+fragment, two misaligned words) and normalizes stray casing before a candidate
+is trusted. Shared by the offline corpus sync and the per-job glossary proposal.
+
+Blocking (plain httpx calls with retry sleeps): async callers must run it via
 asyncio.to_thread.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 LANG_NAMES = {'en': 'English', 'fr': 'French', 'cs': 'Czech', 'bg': 'Bulgarian', 'de': 'German', 'es': 'Spanish',
               'pt': 'Portuguese', 'ar': 'Arabic'}
@@ -39,9 +40,16 @@ Return ONLY JSON: {{"verdicts": {{"<id>": {{"keep": true|false, "{lang_a}": "<no
 
 
 def _post_with_backoff(url: str, headers: dict, payload: dict, retries: int = 4) -> httpx.Response:
-    """Databricks endpoints are rate-limited (~100k ITPM / 20k OTPM) - a batch of
-    verification calls will occasionally 429: wait and retry rather than losing
-    the batch. Respects Retry-After when the server sends one."""
+    """POST to a rate-limited endpoint, retrying on HTTP 429.
+
+    Waits for the Retry-After header when present, at least 20 seconds times the attempt number.
+
+    :param url: request URL.
+    :param headers: request headers.
+    :param payload: JSON body.
+    :param retries: number of retries after the first attempt.
+    :return: the successful response; raises httpx.HTTPStatusError on other errors.
+    """
     r = None
     for attempt in range(retries + 1):
         r = httpx.post(url, headers=headers, json=payload, timeout=120, verify=False)
@@ -58,10 +66,19 @@ def _post_with_backoff(url: str, headers: dict, payload: dict, retries: int = 4)
 
 def llm_verify(rows: list[dict], lang_a: str, lang_b: str, endpoint: str, host: str, token: str,
                batch: int = 25) -> list[dict]:
-    """Filter+normalize candidates before they're trusted. A batch/row that
-    errors or comes back without a verdict is kept as-is (fail-open) rather
-    than silently dropped - the goal is to catch clear extraction artifacts,
-    not to add a new way for good terms to go missing."""
+    """Filter and normalize term-pair candidates with an LLM.
+
+    Fail-open: a batch that errors, or a row without a verdict, is kept unchanged.
+
+    :param rows: candidate dicts keyed by language code.
+    :param lang_a: first language code.
+    :param lang_b: second language code.
+    :param endpoint: serving endpoint name.
+    :param host: Databricks workspace host.
+    :param token: access token for the endpoint.
+    :param batch: number of candidates per LLM call.
+    :return: the kept candidates, with casing normalized where the LLM proposed it.
+    """
     system = _VERIFY_PROMPT.format(
         lang_a_name=LANG_NAMES[lang_a], lang_b_name=LANG_NAMES[lang_b], lang_a=lang_a, lang_b=lang_b)
     kept: list[dict] = []
@@ -82,7 +99,7 @@ def llm_verify(rows: list[dict], lang_a: str, lang_b: str, endpoint: str, host: 
             if m:
                 verdicts = json.loads(m.group(0)).get('verdicts', {})
         except Exception as e:
-            print(f'  ! lot de verification LLM en echec ({e}) - lot garde tel quel (fail-open)')
+            logger.warning('LLM verification batch failed (%s); batch kept unchanged (fail-open)', e)
         for j, row in enumerate(chunk):
             v = verdicts.get(str(j))
             if v is None:

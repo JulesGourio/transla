@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 from pathlib import Path
 
 from .build_review_batch import _norm
@@ -32,10 +33,15 @@ LANGS = ('fr', 'en', 'cs', 'bg', 'de', 'es')
 GLOSSARY_DIR = Path(__file__).resolve().parent
 CANDIDATES_DIR = GLOSSARY_DIR.parent.parent / 'Translator' / 'glossary' / 'candidates'
 
+logger = logging.getLogger(__name__)
+
 
 def load_index_definitions(paths: list[Path]) -> dict[str, dict]:
-    """_norm(term) -> {'definition', 'source'} pour chaque terme d'une entrée
-    index qui porte une définition non vide."""
+    """Index the authentic definitions of the terminology CSVs by term.
+
+    :param paths: ``index_terms_*.csv`` files; earlier files and rows win on duplicate terms.
+    :return: ``_norm(term)`` -> ``{'definition', 'source'}`` for every term of an entry with a non-empty definition.
+    """
     defs: dict[str, dict] = {}
     for path in paths:
         with path.open('r', encoding='utf-8-sig', newline='') as f:
@@ -46,8 +52,6 @@ def load_index_definitions(paths: list[Path]) -> dict[str, dict]:
                 for lang in LANGS:
                     term = (row.get(lang) or '').strip()
                     if term:
-                        # premier arrivé gagne : les fichiers passés en premier
-                        # (ou les entrées les plus hautes) priment
                         defs.setdefault(_norm(term), {
                             'definition': definition,
                             'source': (row.get('source') or path.stem),
@@ -56,6 +60,13 @@ def load_index_definitions(paths: list[Path]) -> dict[str, dict]:
 
 
 def enrich_batch(path: Path, index_defs: dict[str, dict], in_place: bool) -> tuple[int, Path]:
+    """Replace missing or generated definitions of a review batch with corpus definitions.
+
+    :param path: ``review_batch_*.csv`` to enrich.
+    :param index_defs: Output of ``load_index_definitions``.
+    :param in_place: True to rewrite ``path``, False to write ``<stem>_crosslang.csv`` beside it.
+    :return: ``(number of rows enriched, path written)``.
+    """
     with path.open('r', encoding='utf-8-sig', newline='') as f:
         reader = csv.DictReader(f, delimiter=';')
         fieldnames = list(reader.fieldnames or [])
@@ -84,6 +95,7 @@ def enrich_batch(path: Path, index_defs: dict[str, dict], in_place: bool) -> tup
 
 
 def main() -> None:
+    """Command-line entry point: enrich every review batch with corroborated definitions."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--index', nargs='*', type=Path,
                     help='CSV index_terms_*.csv (défaut : utils/glossary/ + candidates/)')
@@ -102,19 +114,20 @@ def main() -> None:
         if not p.stem.endswith('_crosslang')
     )
     if not index_paths:
-        print('Aucun index_terms_*.csv trouvé — lancer extract_index_terms d\'abord.')
+        logger.warning('Aucun index_terms_*.csv trouvé — lancer extract_index_terms d\'abord.')
         return
     if not batch_paths:
-        print('Aucun review_batch_*.csv trouvé — lancer build_review_batch d\'abord.')
+        logger.warning('Aucun review_batch_*.csv trouvé — lancer build_review_batch d\'abord.')
         return
 
     index_defs = load_index_definitions(index_paths)
-    print(f'{len(index_defs)} terme(s) avec définition authentique dans {len(index_paths)} fichier(s) index')
+    logger.info('%d terme(s) avec définition authentique dans %d fichier(s) index', len(index_defs), len(index_paths))
 
     for path in batch_paths:
         enriched, out = enrich_batch(path, index_defs, args.in_place)
-        print(f'  {path.name}: {enriched} définition(s) corroborée(s) -> {out.name}')
+        logger.info('  %s: %d définition(s) corroborée(s) -> %s', path.name, enriched, out.name)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

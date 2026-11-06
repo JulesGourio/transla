@@ -16,16 +16,14 @@ casse d'origine gardee seulement pour les noms propres/acronymes).
    `review_shortlist.csv` : priority/pair/fr/en/cs/bg/de/es/n_docs/
    definition/definition_source/sources/status - defaut : review_shortlist.csv),
 2. dedoublonne (meme normalisation `_norm` que build_review_batch.py) contre
-   ce qui est deja dans `glossary_terms` en Lakebase (le vrai glossaire
-   vivant - PAS Translator/glossary/terms.csv, qui est reste un gabarit
-   obsolete depuis que les seeds vont directement en Lakebase),
+   ce qui est deja dans `glossary_terms` en Lakebase (le glossaire vivant,
+   pas Translator/glossary/terms.csv),
 3. verifie chaque paire restante via LLM (par lot, groupe par paire de
    langues) - normalise la casse, rejette ce qui n'est pas un terme
    autonome valide,
 4. insere directement dans `glossary_terms` (term_id auto T####) ce qui
-   passe la verification. Pas de detour par `glossary_candidates` : cette
-   table de revue humaine reste disponible pour l'ajout manuel depuis le
-   panel, mais n'est plus alimentee par ce script.
+   passe la verification. `glossary_candidates` (revue humaine, ajout manuel
+   depuis le panel) n'est pas alimentee par ce script.
 
 Par defaut en DRY-RUN (pas d'appel LLM, juste le compte apres dedup) -
 passer --apply pour verifier et ecrire reellement.
@@ -39,6 +37,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -47,14 +46,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / 'utils' / 'databricks_ops' / 'lakebase_sync'))
 
-from .build_review_batch import _norm  # même normalisation que la dédup amont
+from .build_review_batch import _norm  # same normalisation as the upstream dedup
 from server.services.translation.glossary_verify import llm_verify  # noqa: F401 (re-exported for CLI usage below)
 
 LANGS = ('en', 'fr', 'cs', 'bg', 'de', 'es')
 DEFAULT_CSV = REPO_ROOT / 'Translator' / 'glossary' / 'candidates' / 'review_shortlist.csv'
 
+logger = logging.getLogger(__name__)
+
 
 def _databricks_auth(endpoint: str) -> tuple[str, str, str]:
+    """Resolve the workspace credentials of the LLM endpoint.
+
+    :param endpoint: Name of the serving endpoint, returned unchanged.
+    :return: ``(endpoint, host, token)``; taken from DATABRICKS_HOST/DATABRICKS_TOKEN when both are set,
+        otherwise from the UAT CLI profile.
+    """
     env_host, env_token = os.environ.get('DATABRICKS_HOST'), os.environ.get('DATABRICKS_TOKEN')
     if env_host and env_token:
         return endpoint, env_host.rstrip('/'), env_token
@@ -65,6 +72,13 @@ def _databricks_auth(endpoint: str) -> tuple[str, str, str]:
 
 
 def load_rows(paths: list[Path]) -> list[dict]:
+    """Read candidate CSVs (delimiter ';') into normalised rows.
+
+    :param paths: CSV files with at least one language column.
+    :return: One dict per row having at least one term: a value per language in ``LANGS``, ``n_docs``, ``sources``,
+        ``definition``, ``definition_source``, ``priority`` (None if absent) and ``status``. Files without a language
+        column are skipped.
+    """
     rows: list[dict] = []
     for path in paths:
         with path.open('r', encoding='utf-8-sig', newline='') as f:
@@ -72,7 +86,7 @@ def load_rows(paths: list[Path]) -> list[dict]:
             fields = [c.strip().lower() for c in (reader.fieldnames or [])]
             lang_cols = [c for c in fields if c in LANGS]
             if not lang_cols:
-                print(f'  {path.name}: aucune colonne de langue ({fields}) — ignoré')
+                logger.warning('  %s: aucune colonne de langue (%s) — ignoré', path.name, fields)
                 continue
             n = 0
             for raw in reader:
@@ -98,17 +112,15 @@ def load_rows(paths: list[Path]) -> list[dict]:
                     'priority': priority,
                     'status': (row.get('status') or 'pending').lower() or 'pending',
                 })
-            print(f'  {path.name}: {n} ligne(s) avec au moins un terme')
+            logger.info('  %s: %d ligne(s) avec au moins un terme', path.name, n)
     return rows
 
 
 def main() -> None:
-    # Console Windows en cp1252 : les caractères type flèche/tiret cadratin du
-    # docstring/résumé planteraient sur --help ou en fin de run (même bug que
-    # build_review_batch.py, constaté 2026-07-17) — reconfigurer plutôt que
-    # perdre l'affichage.
+    """Command-line entry point: dedupe, LLM-verify and publish candidate terms to ``glossary_terms``."""
+    # A cp1252 Windows console cannot print arrows or em dashes of the help text and summary.
     try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -124,20 +136,17 @@ def main() -> None:
 
     rows = load_rows(args.csvs)
     if not rows:
-        print('Rien à publier.')
+        logger.info('Rien à publier.')
         return
 
     from migrate_lakebase import sdk_lakebase_connect
-    print(f'Connexion Lakebase {args.env}…')
+    logger.info('Connexion Lakebase %s…', args.env)
     conn = sdk_lakebase_connect(args.env)
     try:
         with conn.cursor() as cur:
             cur.execute('SELECT en, fr, cs, bg, de, es FROM glossary_terms')
             known = {_norm(v) for row in cur.fetchall() for v in row if v and v.strip()}
-            # Also dedupe against glossary_candidates: rows already sitting there
-            # from an older run of this script (back when it published to the
-            # pending-review queue) must not be republished as new terms now
-            # that this script inserts straight into glossary_terms.
+            # Rows already queued for review must not be republished as new terms.
             cur.execute('SELECT en, fr, cs, bg, de, es FROM glossary_candidates')
             known |= {_norm(v) for row in cur.fetchall() for v in row if v and v.strip()}
 
@@ -151,20 +160,20 @@ def main() -> None:
                     known.add(_norm(r[l]))
             to_insert.append(r)
 
-        print(f'{len(rows)} lignes lues, {skipped} déjà au glossaire ou en attente de revue, '
-              f'{len(to_insert)} à publier')
+        logger.info('%d lignes lues, %d déjà au glossaire ou en attente de revue, %d à publier',
+                    len(rows), skipped, len(to_insert))
         for r in to_insert[:15]:
             langs = ' | '.join(f'{l}={r[l]}' for l in LANGS if r[l])
-            print(f"  [P{r['priority']} n_docs={r['n_docs']}] {langs}")
+            logger.info('  [P%s n_docs=%s] %s', r['priority'], r['n_docs'], langs)
         if len(to_insert) > 15:
-            print(f'  … et {len(to_insert) - 15} de plus')
+            logger.info('  … et %d de plus', len(to_insert) - 15)
 
         if not args.apply:
-            print('\nDRY-RUN — rien vérifié ni écrit. Relancer avec --apply pour publier.')
+            logger.info('\nDRY-RUN — rien vérifié ni écrit. Relancer avec --apply pour publier.')
             return
 
         if args.no_llm_verify:
-            print('--no-llm-verify : aucune vérification, publication telle quelle.')
+            logger.info('--no-llm-verify : aucune vérification, publication telle quelle.')
             verified = to_insert
         else:
             by_pair: dict[tuple, list[dict]] = {}
@@ -175,19 +184,17 @@ def main() -> None:
             verified = []
             for present, group in by_pair.items():
                 if len(present) != 2:
-                    print(f'  ! {len(group)} ligne(s) avec {len(present)} langue(s) ({present}) — '
-                          f'gardées sans vérification (paire attendue)')
+                    logger.warning('  ! %d ligne(s) avec %d langue(s) (%s) — gardées sans vérification (paire attendue)',
+                                   len(group), len(present), present)
                     verified.extend(group)
                     continue
                 lang_a, lang_b = present
-                print(f'Vérification LLM {lang_a}/{lang_b} : {len(group)} candidat(s)…')
+                logger.info('Vérification LLM %s/%s : %d candidat(s)…', lang_a, lang_b, len(group))
                 ok = llm_verify(group, lang_a, lang_b, endpoint, host, token)
-                print(f'  -> {len(ok)}/{len(group)} gardé(s) après vérification')
+                logger.info('  -> %d/%d gardé(s) après vérification', len(ok), len(group))
                 verified.extend(ok)
 
-            # Une normalisation de casse peut faire converger deux lignes du même
-            # lot vers le même terme — filtrer les doublons introduits ici, en
-            # plus de ceux déjà écartés contre le glossaire existant.
+            # Case normalisation can make two rows of the batch converge on the same term.
             seen_now: set = set()
             deduped = []
             for r in verified:
@@ -214,7 +221,7 @@ def main() -> None:
                     (term_id, *[r[l] for l in LANGS], r['definition'], r['definition_source']),
                 )
         conn.commit()
-        print(f'Publié {len(verified)} terme(s) dans glossary_terms ({args.env}).')
+        logger.info('Publié %d terme(s) dans glossary_terms (%s).', len(verified), args.env)
     except Exception:
         conn.rollback()
         raise
@@ -223,4 +230,5 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

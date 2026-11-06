@@ -12,11 +12,13 @@ DNT: glossary/dnt.csv — pattern-based do-not-translate rules.
 from __future__ import annotations
 import csv
 import fnmatch
+import logging
 import re
 from datetime import date
 from pathlib import Path
 
-# Resolve glossary dir relative to project root (parent of tools/)
+logger = logging.getLogger(__name__)
+
 GLOSSARY_DIR = Path(__file__).resolve().parent.parent / "glossary"
 TERMS_FILE = GLOSSARY_DIR / "terms.csv"
 DNT_FILE = GLOSSARY_DIR / "dnt.csv"
@@ -31,7 +33,10 @@ DNT_FIELDS = ["pattern", "type", "match_mode", "notes"]
 # ---------------------------------------------------------------------------
 
 def load_glossary() -> list[dict]:
-    """Load all glossary terms. Returns list of row dicts."""
+    """Load all glossary terms from the CSV file.
+
+    :return: one dict per row; empty when the file does not exist.
+    """
     if not TERMS_FILE.exists():
         return []
     rows = []
@@ -42,7 +47,10 @@ def load_glossary() -> list[dict]:
 
 
 def save_glossary(rows: list[dict]) -> None:
-    """Overwrite the glossary with the given rows."""
+    """Overwrite the glossary CSV with the given rows, sorted by term_id.
+
+    :param rows: row dicts; keys outside the glossary columns are dropped.
+    """
     GLOSSARY_DIR.mkdir(parents=True, exist_ok=True)
     rows_sorted = sorted(rows, key=lambda r: r.get("term_id", ""))
     with TERMS_FILE.open("w", encoding="utf-8", newline="") as f:
@@ -53,7 +61,11 @@ def save_glossary(rows: list[dict]) -> None:
 
 
 def _next_term_id(rows: list[dict]) -> str:
-    """Generate next T0001-style ID."""
+    """Compute the next T0001-style term id.
+
+    :param rows: existing glossary rows.
+    :return: id one above the highest existing numeric id.
+    """
     max_id = 0
     for row in rows:
         tid = row.get("term_id", "")
@@ -64,9 +76,14 @@ def _next_term_id(rows: list[dict]) -> str:
 
 def lookup(term: str, source_lang: str, target_lang: str,
            rows: list[dict] | None = None) -> str | None:
-    """Find a glossary row where source_lang column matches `term` (case-
-    insensitive) and return the target_lang column value. Returns None if
-    not found or target column is empty."""
+    """Find the target-language value for a term, matching the source column case-insensitively.
+
+    :param term: source-language term.
+    :param source_lang: language code of the term.
+    :param target_lang: language code of the wanted value.
+    :param rows: glossary rows; None loads them from disk.
+    :return: the target value, or None when the term is unknown or its target column is empty.
+    """
     if rows is None:
         rows = load_glossary()
     term_lower = term.strip().lower()
@@ -80,8 +97,14 @@ def lookup(term: str, source_lang: str, target_lang: str,
 
 def add_term(translations: dict[str, str], domain: str = "",
              notes: str = "", rows: list[dict] | None = None) -> str:
-    """Add a new term row. `translations` is a dict like {"en": "screw", "fr": "vis", "cs": "šroub"}.
-    Returns the assigned term_id. Saves to disk."""
+    """Add a term row and save the glossary.
+
+    :param translations: language code to term, e.g. {"en": "screw", "fr": "vis"}.
+    :param domain: domain label.
+    :param notes: free-text notes.
+    :param rows: glossary rows to extend; None loads them from disk.
+    :return: the assigned term id.
+    """
     if rows is None:
         rows = load_glossary()
     tid = _next_term_id(rows)
@@ -96,10 +119,13 @@ def add_term(translations: dict[str, str], domain: str = "",
 
 def merge_terms(term_pairs: list[dict], source_lang: str,
                 target_lang: str) -> int:
-    """Bulk-add terms from a translation session. Each dict in term_pairs
-    should have keys matching language codes (at minimum source_lang and
-    target_lang). Skips terms already in the glossary for that source_lang
-    value. Returns count of new terms added."""
+    """Bulk-add terms, skipping those whose source-language value already exists.
+
+    :param term_pairs: dicts keyed by language code (at least source_lang and target_lang), with optional "domain" and "notes".
+    :param source_lang: language code used to detect duplicates.
+    :param target_lang: target language code.
+    :return: number of terms added.
+    """
     rows = load_glossary()
     existing = {(row.get(source_lang) or "").strip().lower() for row in rows}
     added = 0
@@ -129,10 +155,14 @@ DNT_MATCH_MODES = ("exact", "prefix", "glob", "regex")
 
 
 def dnt_rule_problem(pattern: str, match_mode: str) -> str | None:
-    """Why a DNT rule must not be saved, or None when it is fine. A rule that
-    matches every segment (prefix "*", glob "*", regex ".*") silently leaves the
-    whole document untranslated for everyone, and an invalid regex is skipped by
-    DntMatcher without a word — the reviewer believes a rule is active that is not."""
+    """Explain why a DNT rule must not be saved.
+
+    A rule matching every segment would leave the whole document untranslated, and an invalid regex is skipped by DntMatcher silently.
+
+    :param pattern: rule pattern.
+    :param match_mode: one of DNT_MATCH_MODES.
+    :return: the reason, or None when the rule is acceptable.
+    """
     pattern = (pattern or "").strip()
     if not pattern:
         return "The pattern cannot be empty"
@@ -153,7 +183,11 @@ def dnt_rule_problem(pattern: str, match_mode: str) -> str | None:
 class DntMatcher:
     """Compiled matcher for pattern-based DNT rules."""
 
-    def __init__(self, rules: list[dict]):
+    def __init__(self, rules: list[dict]) -> None:
+        """Compile DNT rules.
+
+        :param rules: rule dicts with "pattern" and "match_mode" (default "exact"); empty patterns and invalid regexes are ignored.
+        """
         self._exact: set[str] = set()
         self._prefixes: list[str] = []
         self._globs: list[str] = []
@@ -176,7 +210,11 @@ class DntMatcher:
                     pass
 
     def is_dnt(self, token: str) -> bool:
-        """Check if a token matches any DNT rule."""
+        """Check a token against all DNT rules.
+
+        :param token: token to test.
+        :return: True when any rule matches.
+        """
         if token in self._exact:
             return True
         for prefix in self._prefixes:
@@ -192,7 +230,10 @@ class DntMatcher:
 
 
 def load_dnt_rules() -> list[dict]:
-    """Load DNT rules from dnt.csv."""
+    """Load DNT rules from dnt.csv.
+
+    :return: one dict per row; empty when the file does not exist.
+    """
     if not DNT_FILE.exists():
         return []
     rows = []
@@ -203,12 +244,18 @@ def load_dnt_rules() -> list[dict]:
 
 
 def load_dnt_matcher() -> DntMatcher:
-    """Load and compile DNT rules into a matcher."""
+    """Load DNT rules and compile them.
+
+    :return: a matcher over the rules in dnt.csv.
+    """
     return DntMatcher(load_dnt_rules())
 
 
 def save_dnt_rules(rules: list[dict]) -> None:
-    """Save DNT rules to dnt.csv."""
+    """Save DNT rules to dnt.csv.
+
+    :param rules: rule dicts; keys outside the DNT columns are dropped.
+    """
     GLOSSARY_DIR.mkdir(parents=True, exist_ok=True)
     with DNT_FILE.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=DNT_FIELDS)
@@ -222,17 +269,18 @@ def save_dnt_rules(rules: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"Glossary dir: {GLOSSARY_DIR}")
-    print(f"Terms file exists: {TERMS_FILE.exists()}")
-    print(f"DNT file exists: {DNT_FILE.exists()}")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger.info("Glossary dir: %s", GLOSSARY_DIR)
+    logger.info("Terms file exists: %s", TERMS_FILE.exists())
+    logger.info("DNT file exists: %s", DNT_FILE.exists())
     rows = load_glossary()
-    print(f"Glossary terms loaded: {len(rows)}")
+    logger.info("Glossary terms loaded: %d", len(rows))
     rules = load_dnt_rules()
-    print(f"DNT rules loaded: {len(rules)}")
+    logger.info("DNT rules loaded: %d", len(rules))
     if rules:
         m = load_dnt_matcher()
         test_tokens = ["NAS6404A22", "MS21299C4", "IF2.03.08", "PR1440MB2",
                         "hello", "vis", "LATECOERE", "12/16/2024"]
-        print("DNT matching test:")
+        logger.info("DNT matching test:")
         for t in test_tokens:
-            print(f"  {t:20s} -> {'DNT' if m.is_dnt(t) else 'translate'}")
+            logger.info("  %-20s -> %s", t, "DNT" if m.is_dnt(t) else "translate")

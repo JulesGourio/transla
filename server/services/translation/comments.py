@@ -1,7 +1,4 @@
-"""Word-native review comments — ported from the POC's tools/comments.py
-(inject), adapted to operate on in-memory bytes rather than file paths (the
-same style of adaptation extract.py/rebuild.py got — see
-server/services/processors/translation.py).
+"""Word-native review comments, injected into an in-memory .docx.
 
 Word comments require four coordinated parts:
   1. word/comments.xml — the comment bodies
@@ -10,8 +7,7 @@ Word comments require four coordinated parts:
   3. word/_rels/document.xml.rels — relationship entry for comments.xml
   4. [Content_Types].xml — content type override for comments.xml
 
-See review_comments.py for what generates the comment specs this module
-injects.
+review_comments.py generates the comment specs this module injects.
 """
 from __future__ import annotations
 
@@ -34,13 +30,22 @@ _XML_DECL_FIXED = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 
 
 def _serialize(root) -> bytes:
+    """Serialize an XML tree with a double-quoted XML declaration.
+
+    :param root: lxml element to serialize.
+    :return: UTF-8 XML bytes.
+    """
     raw = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
     return raw.replace(_XML_DECL, _XML_DECL_FIXED, 1)
 
 
 def _build_comments_xml(comments: list[dict[str, Any]], existing_xml: bytes | None) -> tuple[bytes, dict[str, int]]:
-    """Build comments.xml, appending to an existing one if the source
-    document already had Word comments (never silently drop those)."""
+    """Build comments.xml, appending to the document's existing comments when it has some.
+
+    :param comments: comment specs with "seg_id", "comment" and optional "author" and "type".
+    :param existing_xml: current word/comments.xml bytes; None when the document has no comments.
+    :return: (comments.xml bytes, mapping of seg_id to the Word comment id).
+    """
     if existing_xml:
         root = etree.fromstring(existing_xml)
         max_id = max((int(c.get(W + 'id', 0)) for c in root), default=0)
@@ -84,12 +89,16 @@ def _add_all_comment_markers(
     doc_root, comments: list[dict[str, Any]], comment_ids: dict[str, int],
     xml_choice_paths: dict[str, list],
 ) -> int:
-    """Walk each comment's positional path (the same xml_choice_path
-    extract.py/rebuild_docx_bytes already use) to its target <w:p> and wrap
-    it in commentRangeStart/End + a commentReference run. A path that no
-    longer resolves (should not happen right after a fresh rebuild) is
-    skipped, not raised — a placement miss is not worth failing the job
-    over."""
+    """Wrap each comment's target paragraph in comment range markers and a reference run.
+
+    A path that does not resolve is skipped rather than raised.
+
+    :param doc_root: root element of word/document.xml; mutated in place.
+    :param comments: comment specs with "seg_id".
+    :param comment_ids: mapping of seg_id to Word comment id.
+    :param xml_choice_paths: mapping of seg_id to its positional path, a list of (tag, child index) steps from the root.
+    :return: number of comments anchored.
+    """
     placed = 0
     for spec in comments:
         sid = spec['seg_id']
@@ -113,11 +122,7 @@ def _add_all_comment_markers(
         cid = comment_ids[sid]
         start = etree.Element(W + 'commentRangeStart')
         start.set(W + 'id', str(cid))
-        # <w:pPr>, when present, MUST stay the first child of <w:p> per the
-        # OOXML schema (it carries numbering/list refs, alignment, indent) —
-        # inserting unconditionally at index 0 pushed it to second position,
-        # which Word can respond to by dropping the paragraph's numbering/
-        # list formatting the moment a comment is anchored on it.
+        # <w:pPr> must stay the first child of <w:p>, or Word drops the paragraph's numbering.
         insert_idx = 1 if len(cur) and cur[0].tag == W + 'pPr' else 0
         cur.insert(insert_idx, start)
 
@@ -135,6 +140,11 @@ def _add_all_comment_markers(
 
 
 def _ensure_comments_relationship(rels_xml: bytes) -> bytes:
+    """Add the comments relationship to document.xml.rels if missing.
+
+    :param rels_xml: word/_rels/document.xml.rels bytes.
+    :return: rels bytes containing the comments relationship.
+    """
     root = etree.fromstring(rels_xml)
     ns = 'http://schemas.openxmlformats.org/package/2006/relationships'
     for rel in root:
@@ -156,6 +166,11 @@ def _ensure_comments_relationship(rels_xml: bytes) -> bytes:
 
 
 def _ensure_comments_content_type(ct_xml: bytes) -> bytes:
+    """Add the comments content-type override if missing.
+
+    :param ct_xml: [Content_Types].xml bytes.
+    :return: content-types bytes containing the comments override.
+    """
     root = etree.fromstring(ct_xml)
     ns = 'http://schemas.openxmlformats.org/package/2006/content-types'
     for child in root:
@@ -170,18 +185,14 @@ def _ensure_comments_content_type(ct_xml: bytes) -> bytes:
 def inject_comments(
     docx_bytes: bytes, comments: list[dict[str, Any]], xml_choice_paths: dict[str, list],
 ) -> tuple[bytes, int]:
-    """Add real Word comments (Review pane, not just inline text) to a
-    rebuilt .docx.
+    """Add real Word comments (Review pane) to a rebuilt .docx.
 
-    comments: [{seg_id, author, type, comment}, ...] — see
-    review_comments.py for how these are generated from the job's own
-    already-computed conflict/fit-check/pattern data.
-    xml_choice_paths: seg_id -> positional path (same field
-    rebuild_docx_bytes already consumes), so an anchor lands on the exact
-    paragraph the comment is about.
+    A comment that cannot be anchored is dropped; this never raises on a bad path.
 
-    Returns (new_docx_bytes, comments_placed). Never raises on a bad path —
-    a comment that can't be anchored is dropped, not a rebuild failure.
+    :param docx_bytes: the rebuilt .docx.
+    :param comments: comment specs [{seg_id, author, type, comment}, ...].
+    :param xml_choice_paths: mapping of seg_id to the positional path of the paragraph the comment is about.
+    :return: (new .docx bytes, number of comments placed); the input bytes and 0 when there are no comments.
     """
     if not comments:
         return docx_bytes, 0
@@ -208,7 +219,7 @@ def inject_comments(
                 elif name == '[Content_Types].xml':
                     zout.writestr(name, ct_xml)
                 elif name == 'word/comments.xml':
-                    continue  # replaced below
+                    continue  # rewritten after the loop
                 else:
                     zout.writestr(name, zin.read(name))
             zout.writestr('word/comments.xml', comments_xml)

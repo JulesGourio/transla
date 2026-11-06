@@ -9,6 +9,7 @@ Parent: [utils](../README.md).
 | File | Content |
 |---|---|
 | `deploy_latlang.ps1` | The deployment script |
+| `ensure_app_access.ps1` | Creates, when missing, the Postgres role of the app's service principal on the shared Lakebase project |
 | `render_target_config_env.py` | Writes `target_config.env` for one target from `target_env.json` |
 | `target_env.json` | The settings that differ per target: `LAKEBASE_DATABASE`, `TRANSLATE_VOLUME_PATH`, `SOFFICE_ARCHIVE_VOLUME_PATH` |
 
@@ -25,7 +26,7 @@ app is named `latlang` in both.
 
 Steps:
 
-1. Build the frontend (`bun install`, `bun run build`), unless `-SkipBuild`.
+1. Build the frontend (`bun install --frozen-lockfile`, `bun run build`), unless `-SkipBuild`.
 2. Render `target_config.env`, then either run `databricks bundle deploy` (`-Infra`) or `databricks sync` the working
    folder to `/Workspace/Shared/.bundle/latlang/<target>/files`. The sync force-includes `target_config.env` and
    `client/out` (both are git-ignored) and leaves out the frontend sources.
@@ -34,6 +35,15 @@ Steps:
 
 `-Infra` applies the bundle: app permissions, the schema and volumes, the jobs. The first deployment of a target needs
 `MANAGE` on the target catalog. A routine code change does not need it.
+
+## ensure_app_access.ps1
+
+```powershell
+.\utils\deploy\ensure_app_access.ps1 -AppEnv dev     # dev | uat
+```
+
+Reads the service principal of the app `latlang`, looks for its role on `projects/qualibot/branches/production` and creates
+it with `createdb` when absent. Run it once after the first deployment of a target, then restart the app.
 
 ## target_env.json
 

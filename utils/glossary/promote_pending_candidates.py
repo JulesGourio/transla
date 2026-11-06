@@ -1,16 +1,9 @@
-"""One-off migration: LLM-verify the existing backlog of `glossary_candidates`
-(status='pending', published by an earlier run of sync_candidates_to_lakebase.py
-before it was redesigned to skip the pending queue) and promote survivors
+"""LLM-verify the backlog of `glossary_candidates` (status='pending') and promote survivors
 straight into `glossary_terms`.
 
-This is a ONE-TIME cleanup of the initial Intraqual-corpus bulk import, not a
-replacement for the standard glossary-growth mechanism. Future terms coming
-from real, human-validated translation work should keep going through human
-review (the panel's manual "add term" form, and/or whatever confirms terms
-during an actual translation job) — this script only clears the backlog that
-predates the corpus-import redesign, using the same llm_verify() check as
-sync_candidates_to_lakebase.py (reject headings/fragments/mismatches,
-normalize stray ALL-CAPS casing).
+It clears the backlog of the Intraqual-corpus bulk import with the same llm_verify() check as
+sync_candidates_to_lakebase.py (reject headings/fragments/mismatches, normalize stray ALL-CAPS casing).
+Terms coming from real translation work go through human review instead.
 
 Kept candidates -> inserted into glossary_terms, candidate row marked
 status='approved' (reviewed_by='llm-auto-verify'). Rejected candidates ->
@@ -26,6 +19,7 @@ and write for real.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -36,10 +30,13 @@ sys.path.insert(0, str(REPO_ROOT / 'utils' / 'databricks_ops' / 'lakebase_sync')
 from .build_review_batch import _norm
 from .sync_candidates_to_lakebase import LANGS, _databricks_auth, llm_verify
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
+    """Command-line entry point: verify pending candidates and, with ``--apply``, publish them to the glossary."""
     try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -51,7 +48,7 @@ def main() -> None:
     args = ap.parse_args()
 
     from migrate_lakebase import sdk_lakebase_connect
-    print(f'Connexion Lakebase {args.env}…')
+    logger.info('Connexion Lakebase %s…', args.env)
     conn = sdk_lakebase_connect(args.env)
     try:
         with conn.cursor() as cur:
@@ -63,7 +60,7 @@ def main() -> None:
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
-        print(f"{len(rows)} candidat(s) au statut '{args.status}' dans glossary_candidates.")
+        logger.info("%d candidat(s) au statut '%s' dans glossary_candidates.", len(rows), args.status)
         if not rows:
             return
 
@@ -73,10 +70,10 @@ def main() -> None:
             by_pair.setdefault(present, []).append(r)
         for present, group in by_pair.items():
             label = '/'.join(present) if len(present) == 2 else str(present)
-            print(f'  {label}: {len(group)} candidat(s)')
+            logger.info('  %s: %d candidat(s)', label, len(group))
 
         if not args.apply:
-            print('\nDRY-RUN — rien vérifié ni écrit. Relancer avec --apply pour publier.')
+            logger.info('\nDRY-RUN — rien vérifié ni écrit. Relancer avec --apply pour publier.')
             return
 
         endpoint, host, token = _databricks_auth(args.endpoint)
@@ -92,16 +89,16 @@ def main() -> None:
         n_kept = n_rejected_verify = n_rejected_dup = n_skipped_pair = 0
         for present, group in by_pair.items():
             if len(present) != 2:
-                print(f'  ! {len(group)} ligne(s) avec {len(present)} langue(s) ({present}) — '
-                      f'ignorées (paire attendue)')
+                logger.warning('  ! %d ligne(s) avec %d langue(s) (%s) — ignorées (paire attendue)',
+                               len(group), len(present), present)
                 n_skipped_pair += len(group)
                 continue
             lang_a, lang_b = present
-            print(f'Vérification LLM {lang_a}/{lang_b} : {len(group)} candidat(s)…')
+            logger.info('Vérification LLM %s/%s : %d candidat(s)…', lang_a, lang_b, len(group))
             kept = llm_verify(group, lang_a, lang_b, endpoint, host, token)
             kept_ids = {r['id'] for r in kept}
             n_rejected_verify += sum(1 for r in group if r['id'] not in kept_ids)
-            print(f'  -> {len(kept)}/{len(group)} gardé(s) après vérification')
+            logger.info('  -> %d/%d gardé(s) après vérification', len(kept), len(group))
 
             with conn.cursor() as cur:
                 for r in group:
@@ -139,9 +136,9 @@ def main() -> None:
                     )
                     n_kept += 1
         conn.commit()
-        print(f'\nPublié {n_kept} terme(s) dans glossary_terms.')
-        print(f'Rejetés : {n_rejected_verify} (vérification LLM), {n_rejected_dup} (doublon), '
-              f'{n_skipped_pair} ignorés (paire de langues inattendue).')
+        logger.info('\nPublié %d terme(s) dans glossary_terms.', n_kept)
+        logger.info('Rejetés : %d (vérification LLM), %d (doublon), %d ignorés (paire de langues inattendue).',
+                    n_rejected_verify, n_rejected_dup, n_skipped_pair)
     except Exception:
         conn.rollback()
         raise
@@ -150,4 +147,5 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

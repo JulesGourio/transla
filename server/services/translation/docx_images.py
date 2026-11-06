@@ -1,18 +1,13 @@
 """OCR + translation of text baked into images embedded in a .docx.
 
-Opt-in (the user picks which images to process, since not every embedded
-image carries text worth translating and each one costs a vision-LLM call).
-Unlike the abandoned native-PDF pipeline, embedded docx images are already
-standalone files in the zip (word/media/imageN.*) — no page rendering/
-cropping needed, the raw bytes go straight to the vision call.
+Opt-in: the user picks which images to process, since each one costs a
+vision-LLM call. Embedded images are standalone files in the zip
+(word/media/imageN.*), so the raw bytes go straight to the vision call.
 
-Restitution never touches the image's pixels: a lesson from the PDF work is
-that a real technical drawing's text is usually scattered across the whole
-image (title, paragraph, several labelled boxes), not one caption-friendly
-area, and resizing the image to fit an overlay would distort it inside its
-existing Word frame (which has its own fixed width/height, independent of
-the image's native pixels). Instead, the translation is inserted as a plain,
-immediately-visible paragraph right after the image in the document flow.
+The image's pixels are never modified: a technical drawing's text is scattered
+across the whole image, and resizing it to fit an overlay would distort it
+inside its fixed-size Word frame. A translation is a plain paragraph inserted
+after the image in the document flow.
 """
 from __future__ import annotations
 
@@ -29,12 +24,8 @@ from ..llm import call_llm_json
 
 logger = logging.getLogger(__name__)
 
-# Prefix on every inserted translation paragraph — also used by
-# processors/translation.py's segment_fidelity check to recognize and
-# exclude this deliberate content growth (same idea as that check's
-# existing word/comments.xml exclusion for injected Word comments, just
-# identified by content instead of by XML part since these paragraphs live
-# inside word/document.xml itself).
+# Prefix of every inserted translation paragraph; the segment_fidelity check
+# recognises these paragraphs by it and excludes them.
 IMAGE_TRANSLATION_MARKER = '[Traduction]'
 
 _RASTER_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')
@@ -61,10 +52,11 @@ _OCR_PROMPT = (
 
 
 def _make_thumbnail(data: bytes) -> str | None:
-    """Small JPEG thumbnail, base64-encoded — returns None if Pillow can't
-    open the bytes (shouldn't happen for anything list_docx_images already
-    let through, but ocr_docx_images calls this too and best-effort fits
-    its own never-fail-the-job stance)."""
+    """Build a small base64 JPEG thumbnail of an image.
+
+    :param data: raw image file bytes.
+    :return: base64-encoded JPEG text, or None when Pillow cannot open the bytes.
+    """
     try:
         img = Image.open(io.BytesIO(data))
         img.thumbnail((_THUMBNAIL_MAX_PX, _THUMBNAIL_MAX_PX))
@@ -77,9 +69,14 @@ def _make_thumbnail(data: bytes) -> str | None:
 
 
 def _vision_payload(name: str, data: bytes) -> Tuple[str, bytes]:
-    """(mime, bytes) the vision endpoint can read. Only PNG and JPEG are sent
-    as-is: .gif/.bmp/.tiff used to go out labelled image/jpeg, the call failed,
-    and the image was skipped without a word."""
+    """Convert an image to a format the vision endpoint accepts.
+
+    PNG and JPEG are sent unchanged; any other format is re-encoded as PNG.
+
+    :param name: media file name, used to pick the format by extension.
+    :param data: raw image file bytes.
+    :return: (MIME type, image bytes).
+    """
     lower = name.lower()
     if lower.endswith('.png'):
         return 'image/png', data
@@ -91,26 +88,23 @@ def _vision_payload(name: str, data: bytes) -> Tuple[str, bytes]:
 
 
 def _content_hash(data: bytes) -> str:
-    """Exact-content hash — deliberately not a perceptual/near-duplicate
-    hash: embedded docx images that are "the same picture" (a repeated
-    logo/header graphic reused across many pages) are byte-identical media
-    files in the zip, so an exact hash is enough to group them, with no risk
-    of merging two genuinely different diagrams that merely look similar."""
+    """Hash image bytes for exact-duplicate grouping.
+
+    An exact hash is enough because a reused picture (a repeated logo) is a byte-identical media file, and it never merges two different diagrams that merely look alike.
+
+    :param data: raw image file bytes.
+    :return: hex SHA-256 digest.
+    """
     return hashlib.sha256(data).hexdigest()
 
 
 def list_docx_images(docx_bytes: bytes) -> List[Dict[str, Any]]:
-    """List embedded raster images with a small thumbnail for a selection UI.
+    """List the embedded raster images of a .docx with a thumbnail for a selection UI.
 
-    Each entry carries a content `hash` and `repeat_count` (how many other
-    embedded images are byte-identical to it) so the UI can badge likely
-    logos/repeated header graphics — OCR only ever runs once per unique
-    hash (see ocr_docx_images), so selecting every instance of a repeated
-    image costs exactly one LLM call, not one per occurrence.
+    Each entry carries a content "hash" and a "repeat_count" (how many embedded images are byte-identical to it), so the UI can badge repeated graphics. Non-raster media (.emf/.wmf) are skipped.
 
-    Non-raster media (.emf/.wmf vector metafiles, common from old Excel
-    paste-ins) are skipped — out of scope for v1, Pillow can't OCR-prep them
-    anyway.
+    :param docx_bytes: the .docx file bytes.
+    :return: dicts with filename, media_path, size_bytes, thumbnail_base64, hash and repeat_count, sorted by media path.
     """
     out: List[Dict[str, Any]] = []
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
@@ -141,22 +135,19 @@ def list_docx_images(docx_bytes: bytes) -> List[Dict[str, Any]]:
 async def ocr_docx_images(
     docx_bytes: bytes, selected_filenames: List[str], host: str, token: str, endpoint: str,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]]]:
-    """Transcribe the selected embedded images via a vision LLM call.
+    """Transcribe the selected embedded images with a vision LLM.
 
-    Deduplicated by exact content hash first — a logo or header graphic
-    reused across many pages is one LLM call, not one per occurrence, and
-    every filename sharing that hash gets the same transcription applied.
+    Images are grouped by exact content hash: one LLM call per unique image, and every selected filename sharing that hash gets the same transcription. A failed or empty transcription skips that group and never raises.
 
-    Best-effort per unique image: a failed or empty transcription just skips
-    that group, never fails the caller. Returns (results, usage_log) —
-    usage_log carries one {filename, usage} entry per call that actually
-    reached the endpoint (the representative filename OCR'd for its group),
-    for the caller to record via the same translation_llm_calls ledger real
-    text-translation batches use.
+    :param docx_bytes: the .docx file bytes.
+    :param selected_filenames: media file names (without directory) to transcribe.
+    :param host: Databricks workspace host.
+    :param token: access token for the LLM endpoint.
+    :param endpoint: serving endpoint name of the vision model.
+    :return: (results, usage_log); results are dicts with filename, media_path, text and thumbnail_base64; usage_log has one {filename, usage} entry per call that reached the endpoint.
     """
     selected = set(selected_filenames)
-    # hash -> {media_path, filename, data} for one representative per group,
-    # plus every selected filename sharing that hash (for fan-out below).
+    # One representative per content hash, plus every selected filename sharing it.
     groups: Dict[str, Dict[str, Any]] = {}
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
         for name in z.namelist():
@@ -206,11 +197,20 @@ async def ocr_docx_images(
 
 
 def _local_name(tag: str) -> str:
+    """Strip the namespace from an XML tag.
+
+    :param tag: tag in Clark notation ("{ns}name") or plain.
+    :return: the local tag name.
+    """
     return tag.rsplit('}', 1)[-1] if '}' in tag else tag
 
 
 def _load_image_rels(z: zipfile.ZipFile) -> Dict[str, str]:
-    """rId -> word/media/... target, for relationships of type .../image."""
+    """Map relationship ids to media targets for the image relationships of the main document.
+
+    :param z: open .docx archive.
+    :return: rId to "word/media/..." path; empty when the document has no relationships part.
+    """
     from lxml import etree as lxml_etree
 
     rels_path = 'word/_rels/document.xml.rels'
@@ -229,20 +229,13 @@ def _load_image_rels(z: zipfile.ZipFile) -> Dict[str, str]:
 
 
 def find_image_anchors(docx_bytes: bytes, filenames: List[str]) -> Dict[str, int]:
-    """Body position (same indexing as extract.py's body_p_idx: the 0-based
-    index of an element among ALL direct children of <w:body>) of the
-    paragraph or table hosting each requested image's <a:blip>, so OCR'd
-    image segments can be ordered near their real location instead of always
-    landing at the end of the segments list (see order_ocr_segments).
+    """Locate the body position hosting each requested image.
 
-    Walking up from the <a:blip> to whichever ancestor is a direct child of
-    <w:body> handles both a plain paragraph and a table cell transparently —
-    a picture inside a table cell resolves to the table's own body index,
-    which is exactly what extract_table already uses as body_p_idx for every
-    segment in that table (see extract.py). Only word/document.xml is
-    scanned (headers/footers out of scope, matching this module's other
-    functions); an image with no resolvable anchor (nested inside a text
-    box, e.g.) is simply absent from the returned dict.
+    The position is the 0-based index, among all direct children of <w:body>, of the paragraph or table containing the image's <a:blip>; it matches extract.py's body_p_idx, and a picture in a table cell resolves to the table's index. Only word/document.xml is scanned.
+
+    :param docx_bytes: the .docx file bytes.
+    :param filenames: media file names (without directory) to locate.
+    :return: file name to body index; images without a resolvable anchor (e.g. inside a text box) are absent.
     """
     from lxml import etree as lxml_etree
 
@@ -288,15 +281,14 @@ def order_ocr_segments(
     ocr_segments: List[Dict[str, Any]],
     anchors: Dict[str, int],
 ) -> List[Dict[str, Any]]:
-    """Splice OCR'd image segments into `base_segments` near the body
-    position of the paragraph/table hosting their image (see
-    find_image_anchors) instead of always appending them after every real
-    segment — insertion order is the only "document order" signal that
-    survives into the DB (segments are listed `ORDER BY id`, see
-    translate.py), so this is what actually controls where an image shows
-    up in the Segments panel. Falls back to the end for anything without a
-    resolved anchor (headers/footers, an image nested in a text box — out
-    of v1 scope, see module docstring).
+    """Splice OCR'd image segments into the extracted segments near their image's body position.
+
+    Segment order is the only document-order signal kept in the database, so it decides where an image appears in the Segments panel.
+
+    :param base_segments: extracted segments, in document order.
+    :param ocr_segments: image segment dicts whose xml_choice_path holds the "media_filename".
+    :param anchors: file name to body index, from find_image_anchors.
+    :return: a new list; image segments without an anchor are appended at the end.
     """
     result = list(base_segments)
     to_place: List[Tuple[int, Dict[str, Any]]] = []
@@ -327,11 +319,13 @@ def order_ocr_segments(
 
 
 def insert_image_translations(docx_bytes: bytes, translations: Dict[str, str]) -> bytes:
-    """Insert a visible paragraph right after each translated image's own
-    paragraph in word/document.xml. `translations` maps media filename
-    (e.g. 'image4.jpg') -> translated text. Everything else in the zip is
-    copied byte-for-byte, same convention as processors/translation.py's
-    rebuild_docx_bytes.
+    """Insert a visible italic paragraph after each translated image's own paragraph in word/document.xml.
+
+    Every other part of the archive is copied byte-for-byte.
+
+    :param docx_bytes: the .docx file bytes.
+    :param translations: media file name (e.g. "image4.jpg") to translated text; line breaks become <w:br/>.
+    :return: the new .docx bytes, or the input unchanged when there is nothing to insert.
     """
     from lxml import etree as lxml_etree
 
@@ -342,16 +336,12 @@ def insert_image_translations(docx_bytes: bytes, translations: Dict[str, str]) -
             return docx_bytes
 
         rid_to_media = _load_image_rels(zin)
-        # filename -> translated text, matched against the media path's basename.
         by_filename = translations
 
         parser = lxml_etree.XMLParser(remove_blank_text=False, strip_cdata=False)
         root = lxml_etree.fromstring(zin.read(doc_path), parser)
 
-        # Find each drawing's enclosing top-level paragraph, resolve its
-        # embedded image to a media filename, and collect (paragraph, text)
-        # pairs to insert after — collected first since mutating the tree
-        # while iterating it is unsafe.
+        # Collected first: mutating the tree while iterating it is unsafe.
         to_insert: List[Tuple[Any, str]] = []
         seen_media: set = set()
         for blip in root.iter(f'{A}blip'):
@@ -363,8 +353,7 @@ def insert_image_translations(docx_bytes: bytes, translations: Dict[str, str]) -
             text = by_filename.get(filename)
             if not text or media_path in seen_media:
                 continue
-            # Walk up to the nearest ancestor <w:p> (the paragraph hosting
-            # this drawing, whatever its own nesting inside mc:AlternateContent).
+            # Nearest ancestor <w:p>, whatever the drawing's nesting inside mc:AlternateContent.
             p = blip
             while p is not None and _local_name(p.tag) != 'p':
                 p = p.getparent()
@@ -379,8 +368,7 @@ def insert_image_translations(docx_bytes: bytes, translations: Dict[str, str]) -
             r = lxml_etree.SubElement(new_p, f'{W}r')
             rpr_run = lxml_etree.SubElement(r, f'{W}rPr')
             lxml_etree.SubElement(rpr_run, f'{W}i')
-            # A literal '\n' inside <w:t> is not a line break in OOXML — each
-            # line needs its own <w:t>, separated by explicit <w:br/>.
+            # A literal newline inside <w:t> is not a line break in OOXML; each line needs its own <w:t> and an explicit <w:br/>.
             lines = [f'{IMAGE_TRANSLATION_MARKER} {line}' if i == 0 else line
                      for i, line in enumerate(text.split('\n'))]
             for i, line in enumerate(lines):

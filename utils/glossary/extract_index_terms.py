@@ -15,6 +15,7 @@ Sortie : CSV status=pending (terme par langue détectée + définition en notes)
 import argparse
 import csv
 import json
+import logging
 import os
 import re
 import subprocess
@@ -23,6 +24,8 @@ from pathlib import Path
 import httpx
 
 from ._sql import CHUNKS_TABLE, LANG_SUFFIX_TO_CODE, SUFFIX_RE, run_sql
+
+logger = logging.getLogger(__name__)
 
 _HEADER_TERMS = ('terminolog', 'glossa', 'definition', 'définition', 'abbreviation',
                  'abréviation', 'abreviation', 'acronym', 'lexique')
@@ -42,6 +45,11 @@ numbers, no section numbers, no prose outside the JSON."""
 
 
 def _all_chunks(ref: str) -> list[dict]:
+    """Fetch every chunk of a document.
+
+    :param ref: Document reference.
+    :return: Dicts ``idx`` (chunk index), ``headers`` and ``text``, ordered by chunk index.
+    """
     ref_sql = ref.replace("'", "''")
     rows = run_sql(f"""
         SELECT chunk_index, semantic_headers, chunk_text
@@ -53,8 +61,11 @@ def _all_chunks(ref: str) -> list[dict]:
 
 
 def _is_empty_header(headers: str) -> bool:
-    """semantic_headers is '{}' (or blank) on 22.5% of the corpus — no signal
-    at all, usually a continuation of the previous section."""
+    """Tell whether a chunk's semantic headers carry no signal (usually a continuation of the previous section).
+
+    :param headers: Raw ``semantic_headers`` value.
+    :return: True for a blank value, ``{}`` or a JSON object with only blank values.
+    """
     h = (headers or '').strip()
     if not h or h == '{}':
         return True
@@ -65,18 +76,15 @@ def _is_empty_header(headers: str) -> bool:
 
 
 def terminology_chunks(ref: str, empty_tolerance: int = 2) -> list[dict]:
-    """Chunks of a REF's terminology/glossary section(s).
+    """Collect the chunks of a document's terminology/glossary section(s).
 
-    The LIKE-on-header seed only catches chunks whose OWN header matches —
-    a long lexicon split across several chunks loses the matching header as
-    soon as the chunker starts a new chunk (one header field per chunk,
-    verified on MI-13601 2026-07-16). Walk forward from each seed: keep
-    following chunks while their header is identical to the seed's OR empty
-    ('{}', no signal — treated as a continuation), tolerating at most
-    `empty_tolerance` consecutive empty-header chunks, and stop at the first
-    DIFFERENT non-empty header. Best-effort by design — a section whose
-    continuation runs past the tolerance is truncated, and everything stays
-    status=pending for human review anyway.
+    A header match only finds the first chunk of a long lexicon, so the walk continues from each match while
+    the following chunks have the same header or an empty one, and stops at the first different non-empty header.
+    A continuation longer than the tolerance is truncated.
+
+    :param ref: Document reference.
+    :param empty_tolerance: Maximum number of consecutive empty-header chunks followed.
+    :return: Matching chunk dicts (see ``_all_chunks``) ordered by chunk index.
     """
     chunks = _all_chunks(ref)
     seeds = [i for i, c in enumerate(chunks)
@@ -100,6 +108,14 @@ def terminology_chunks(ref: str, empty_tolerance: int = 2) -> list[dict]:
 
 
 def llm_entries(text: str, endpoint: str, host: str, token: str) -> list[dict]:
+    """Extract terminology entries from a chunk with the LLM.
+
+    :param text: Chunk text; only the first 6000 characters are sent.
+    :param endpoint: Name of the serving endpoint.
+    :param host: Workspace URL.
+    :param token: Bearer token for the workspace.
+    :return: Entry dicts with a value for at least one language; empty when the answer is not valid JSON.
+    """
     from .extract_glossary_candidates import _post_with_backoff
     r = _post_with_backoff(
         f'{host}/serving-endpoints/{endpoint}/invocations',
@@ -123,17 +139,24 @@ _LANGS = ('fr', 'en', 'cs', 'bg', 'de', 'es')
 
 
 def _doc_lang(ref: str) -> str | None:
-    """Language code from the REF's language suffix, when it has one."""
+    """Read the language code from a reference's language suffix.
+
+    :param ref: Document reference.
+    :return: Language code, or None when the reference has no known suffix.
+    """
     m = re.search(SUFFIX_RE, ref.upper())
     return LANG_SUFFIX_TO_CODE.get(m.group(1)) if m else None
 
 
 def _dedupe_identical_langs(entry: dict, doc_lang: str | None) -> dict:
-    """Deterministic guard behind the prompt instruction: the LLM sometimes
-    still copies one string (typically an acronym) into several language
-    fields, which would fabricate a translation pair out of thin air. Keep
-    the copy in the document's own language (or 'en' as the neutral
-    fallback), blank the duplicates."""
+    """Blank duplicated strings across language fields, which would fabricate a translation pair.
+
+    The copy kept is the one in the document's own language, else ``en``, else the first.
+
+    :param entry: Entry dict with one value per language; modified in place.
+    :param doc_lang: Language code of the document, or None when unknown.
+    :return: The same entry dict.
+    """
     filled = [k for k in _LANGS if (entry.get(k) or '').strip()]
     by_value: dict[str, list[str]] = {}
     for k in filled:
@@ -149,6 +172,7 @@ def _dedupe_identical_langs(entry: dict, doc_lang: str | None) -> dict:
 
 
 def main() -> None:
+    """Command-line entry point: extract the terminology entries of one document into a CSV."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('ref', help='REF du document (ex: DLV-2012)')
     ap.add_argument('--endpoint', default=os.getenv('GLOSSARY_EXTRACT_ENDPOINT', 'databricks-gpt-5-4-mini'))
@@ -160,9 +184,9 @@ def main() -> None:
 
     chunks = terminology_chunks(args.ref, empty_tolerance=args.empty_tolerance)
     if not chunks:
-        print(f'{args.ref}: aucune section terminologie détectée dans les chunks')
+        logger.info('%s: aucune section terminologie détectée dans les chunks', args.ref)
         return
-    print(f'{args.ref}: {len(chunks)} chunk(s) terminologie — en-têtes: {chunks[0]["headers"][:90]}')
+    logger.info('%s: %d chunk(s) terminologie — en-têtes: %s', args.ref, len(chunks), chunks[0]['headers'][:90])
 
     env_host, env_token = os.environ.get('DATABRICKS_HOST'), os.environ.get('DATABRICKS_TOKEN')
     if env_host and env_token:
@@ -192,11 +216,12 @@ def main() -> None:
             w.writerow([e.get('fr', ''), e.get('en', ''), e.get('cs', ''), e.get('bg', ''),
                         e.get('de', ''), e.get('es', ''), (e.get('definition') or '')[:300],
                         e['source'], 'pending'])
-    print(f'{len(entries)} entrées candidates -> {out} (status=pending)')
+    logger.info('%d entrées candidates -> %s (status=pending)', len(entries), out)
     for e in entries[:10]:
         langs = ' | '.join(f'{k}={e[k]}' for k in ('fr', 'en', 'cs', 'bg', 'de', 'es') if e.get(k))
-        print(f'  {langs}' + (f'  [{(e.get("definition") or "")[:50]}]' if e.get('definition') else ''))
+        logger.info('  %s%s', langs, f'  [{(e.get("definition") or "")[:50]}]' if e.get('definition') else '')
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

@@ -1,8 +1,4 @@
-"""Minimal LLM endpoint calling — Databricks Model Serving, JSON output.
-
-Standalone implementation of just what the translate router needs
-(call_llm_json, cost_eur, _fix_mojibake) — no SSE relay or MLflow tracing.
-"""
+"""Databricks Model Serving chat-completion calls with JSON output and cost estimation."""
 
 import json
 import logging
@@ -19,13 +15,11 @@ DEFAULT_TIMEOUT_S = float(os.getenv('TRANSLATE_ENDPOINT_TIMEOUT_S', '300'))
 DEFAULT_CONNECT_TIMEOUT_S = float(os.getenv('TRANSLATE_ENDPOINT_CONNECT_TIMEOUT_S', '30'))
 
 # Waits before each retry of a transient failure (rate limit, gateway error,
-# timeout, dropped connection). Without them the caller's immediate retries all
-# hit the same 429 and a whole document came back "translation failed".
+# timeout, dropped connection); immediate retries would all hit the same 429.
 _RETRY_DELAYS_S = (2.0, 6.0, 15.0)
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 
-# DBU/1M-token rates x contracted EUR/DBU (confirmed 2026-07-29 from the
-# workspace Serving Endpoints console) — kept in sync manually.
+# DBU/1M-token rates x contracted EUR/DBU from the workspace Serving Endpoints console; updated manually.
 _PRICING_USD: Dict[str, Dict[str, float]] = {
     'databricks-gpt-5-4-mini': {'input': 1.817, 'output': 10.901},
     'databricks-gpt-5-mini': {'input': 0.545, 'output': 2.422},
@@ -37,6 +31,11 @@ _EUR_PER_USD = float(os.getenv('EUR_PER_USD', '0.92'))
 
 
 def _fix_mojibake(text: str) -> str:
+    """Repair UTF-8 text that was decoded as Latin-1.
+
+    :param text: Possibly garbled text.
+    :return: The repaired text, or the input unchanged when it is not mojibake.
+    """
     if not text:
         return text
     try:
@@ -44,7 +43,12 @@ def _fix_mojibake(text: str) -> str:
     except (UnicodeDecodeError, UnicodeEncodeError):
         pass
 
-    def _fix_segment(match):
+    def _fix_segment(match: re.Match) -> str:
+        """Repair one run of Latin-1 characters when it decodes as UTF-8.
+
+        :param match: Match over a run of characters in the Latin-1 range.
+        :return: The repaired run, or the run unchanged.
+        """
         seg = match.group(0)
         try:
             return seg.encode('latin-1').decode('utf-8')
@@ -55,6 +59,13 @@ def _fix_mojibake(text: str) -> str:
 
 
 def _cost_eur(endpoint_name: str, input_tokens: int, output_tokens: int) -> float:
+    """Estimate the cost of one call.
+
+    :param endpoint_name: Serving endpoint name; unknown endpoints use a default rate.
+    :param input_tokens: Prompt tokens.
+    :param output_tokens: Completion tokens.
+    :return: Cost in EUR, rounded to 6 decimals.
+    """
     p = _PRICING_USD.get(endpoint_name, _DEFAULT_PRICING)
     return round((input_tokens * p['input'] + output_tokens * p['output']) / 1_000_000 * _EUR_PER_USD, 6)
 
@@ -70,21 +81,34 @@ async def call_llm_json(
     max_tokens: int = 8192,
     temperature: float = 0.0,
 ) -> tuple[Dict[str, Any], Dict[str, int]]:
-    """Single non-streaming chat-completion call, parsed as one JSON object.
+    """Call a chat-completion endpoint without streaming and parse the answer as one JSON object.
 
-    Retries once with a repair instruction if the response isn't valid JSON.
-    Returns (parsed_json, usage) where usage is {'input_tokens', 'output_tokens'}.
+    Transient failures are retried with a delay; an answer that is not valid JSON is retried once with a repair instruction.
+
+    :param host: Workspace base URL.
+    :param token: Bearer token.
+    :param endpoint_name: Serving endpoint name.
+    :param messages: Chat messages in OpenAI format.
+    :param max_tokens: Completion token cap.
+    :param temperature: Sampling temperature; omitted from the request when the endpoint rejects it.
+    :return: ``(parsed_json, usage)`` where usage holds ``input_tokens`` and ``output_tokens``, summed over the repair retry.
+    :raises RuntimeError: On a non-200 answer, an answer without choices, or an answer cut off at ``max_tokens``.
+    :raises json.JSONDecodeError: When the repaired answer is still not valid JSON.
     """
     url = f'{host}/serving-endpoints/{endpoint_name}/invocations'
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     timeout = httpx.Timeout(DEFAULT_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S)
-    # Some models (confirmed: databricks-gpt-5-6-luna) reject an explicit
-    # `temperature` entirely — 400 on any value other than their fixed
-    # default. Detected once per call_llm_json invocation and remembered so
-    # the JSON-repair retry below doesn't pay the same failed round-trip twice.
+    # Some models (e.g. databricks-gpt-5-6-luna) answer 400 to any explicit `temperature`;
+    # detected once per invocation so the repair retry skips it too.
     skip_temperature = False
 
     async def _post(payload: Dict[str, Any]) -> httpx.Response:
+        """POST a payload to the endpoint, retrying transient failures.
+
+        :param payload: JSON request body.
+        :return: The last response; a transient status is returned once retries are exhausted.
+        :raises httpx.TransportError: When the transport fails on the last attempt.
+        """
         for attempt in range(len(_RETRY_DELAYS_S) + 1):
             wait = _RETRY_DELAYS_S[attempt] if attempt < len(_RETRY_DELAYS_S) else None
             try:
@@ -107,15 +131,24 @@ async def call_llm_json(
         raise AssertionError('unreachable')
 
     def _rejects_temperature(resp: httpx.Response) -> bool:
-        # The error is nested JSON-as-a-string inside the outer error body
-        # (escaped quotes), so match loosely rather than on an exact
-        # `"param": "temperature"` substring.
+        """Tell whether a response is a 400 refusing the temperature parameter.
+
+        :param resp: Endpoint response.
+        :return: True when the error body mentions an unsupported temperature.
+        """
+        # The error is JSON nested as a string in the outer body, so match loosely.
         if resp.status_code != 400:
             return False
         text = resp.text.lower()
         return 'temperature' in text and ('unsupported_value' in text or 'does not support' in text)
 
     async def _call(msgs: List[Dict[str, Any]]) -> tuple[str, Dict[str, int]]:
+        """Send one chat request and return the message text.
+
+        :param msgs: Chat messages.
+        :return: ``(content, usage)`` with mojibake repaired.
+        :raises RuntimeError: On a non-200 answer, no choices, or a truncated non-JSON answer.
+        """
         nonlocal skip_temperature
         payload = {'messages': msgs, 'max_tokens': max_tokens, 'stream': False}
         if not skip_temperature:
@@ -149,6 +182,12 @@ async def call_llm_json(
         return content, usage
 
     def _extract_json(text: str) -> Dict[str, Any]:
+        """Parse a JSON object, tolerating a surrounding markdown fence.
+
+        :param text: Model answer.
+        :return: The parsed object.
+        :raises json.JSONDecodeError: When the text is not valid JSON.
+        """
         text = text.strip()
         if text.startswith('```'):
             text = re.sub(r'^```(?:json)?\s*', '', text)

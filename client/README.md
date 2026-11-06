@@ -11,7 +11,7 @@ Parent: [root README](../README.md).
 | [`src/`](src/README.md) | The source |
 | `public/` | Images and logos copied to the build (`images/`, `logos/`). The folder has no README |
 | `index.html` | The page the build starts from |
-| `package.json`, `bun.lock`, `package-lock.json` | Dependencies and scripts |
+| `package.json`, `bun.lock` | Dependencies and scripts |
 | `vite.config.ts` | Vite: React plugin, the `@` alias, port 3000, a proxy of `/api` to `http://localhost:8000`, output to `out`, `vitest` in a Node environment |
 | `tsconfig.json`, `tsconfig.node.json` | TypeScript settings |
 | `tailwind.config.ts`, `postcss.config.mjs` | Tailwind and PostCSS |

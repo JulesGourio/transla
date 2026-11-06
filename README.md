@@ -30,7 +30,7 @@ server/       FastAPI backend: routes, translation engine, Lakebase, LibreOffice
 client/       React and TypeScript frontend (Vite); client/out is the build the backend serves
 docs/         Pipeline and database reference
 utils/        Deployment script, Databricks notebooks and jobs helpers, glossary import tooling, LibreOffice packaging
-resources/    Databricks job declared in the bundle
+resources/    Databricks jobs declared in the bundle
 tests/        pytest suite
 databricks.yml  Databricks Asset Bundle: app, schema, volumes, jobs, targets
 app.yaml      Environment variables of the app, with their defaults
@@ -73,7 +73,7 @@ Nightly job ──> copies every Lakebase table to Delta tables of the same sche
 
 | Target | Catalog | Schema | Notes |
 |---|---|---|---|
-| `dev` | `dev_proj` | `latlang` | Bundle target for development |
+| `dev` | `dev_proj` | `latlang` | Development: deployed with `deploy_latlang.ps1 -AppEnv dev` |
 | `latlang-uat` | `uat_proj` | `latlang` | The deployed application |
 | `latlang-prod` | `prod_proj` | `latlang` | Declared; the workspace host is not set yet |
 
@@ -131,7 +131,7 @@ Tests: `python -m pytest` from the repository root, `cd client && bun run test` 
 ## Deployment
 
 ```powershell
-.\utils\deploy\deploy_latlang.ps1 -AppEnv uat            # code only
+.\utils\deploy\deploy_latlang.ps1 -AppEnv dev            # code only (dev | uat)
 .\utils\deploy\deploy_latlang.ps1 -AppEnv uat -Infra     # also the bundle: app permissions, schema, volumes, jobs
 ```
 

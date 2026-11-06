@@ -14,12 +14,20 @@ Coût : une requête SQL sur le warehouse serverless (aucun LLM).
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from ._sql import CHUNKS_TABLE, LANG_SUFFIX_TO_CODE, SUFFIX_RE, run_sql
 
+logger = logging.getLogger(__name__)
+
 
 def find_families() -> list[dict]:
+    """List the document families published in several languages.
+
+    :return: One dict per family with ``base`` (reference without language suffix), ``langs`` (sorted language codes),
+        ``divisions`` (sorted) and ``versions`` (dicts with ref, suffix, division, n_chunks).
+    """
     rows = run_sql(f"""
         WITH t AS (
           SELECT REF, division,
@@ -52,6 +60,7 @@ def find_families() -> list[dict]:
 
 
 def main() -> None:
+    """Command-line entry point: print the richest families and optionally write the full JSON inventory."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--out', type=Path, help='write full JSON inventory here')
     args = ap.parse_args()
@@ -60,18 +69,19 @@ def main() -> None:
     n_langs = {}
     for f in families:
         n_langs[len(f['langs'])] = n_langs.get(len(f['langs']), 0) + 1
-    print(f'{len(families)} familles multilingues ({dict(sorted(n_langs.items()))} par nombre de langues)')
+    logger.info('%d familles multilingues (%s par nombre de langues)', len(families), dict(sorted(n_langs.items())))
 
     # Les familles les plus riches d'abord — meilleures candidates au glossaire
     top = sorted(families, key=lambda f: -len(f['langs']))[:10]
     for f in top:
         total = sum(v['n_chunks'] for v in f['versions'])
-        print(f"  {f['base']:30} {'/'.join(f['langs']):14} {len(f['versions'])} versions, {total} chunks")
+        logger.info('  %-30s %-14s %d versions, %d chunks', f['base'], '/'.join(f['langs']), len(f['versions']), total)
 
     if args.out:
         args.out.write_text(json.dumps(families, ensure_ascii=False, indent=1), encoding='utf-8')
-        print(f'-> inventaire complet : {args.out}')
+        logger.info('-> inventaire complet : %s', args.out)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

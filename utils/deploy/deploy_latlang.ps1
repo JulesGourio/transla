@@ -45,7 +45,7 @@ try {
         Write-Host "[1/4] Building frontend..." -ForegroundColor Yellow
         Push-Location client
         try {
-            & bun install
+            & bun install --frozen-lockfile
             if ($LASTEXITCODE -ne 0) { throw "bun install failed (exit $LASTEXITCODE)" }
             & bun run build
             if ($LASTEXITCODE -ne 0) { throw "bun run build failed (exit $LASTEXITCODE)" }

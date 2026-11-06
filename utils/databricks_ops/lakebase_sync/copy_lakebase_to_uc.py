@@ -46,18 +46,34 @@
 # COMMAND ----------
 
 # DBTITLE 1,Setup — installs only missing packages, without altering the runtime's own packages
-import importlib.metadata as md, subprocess, sys
+"""Notebook that copies every table of a Lakebase database into Delta tables of a Unity Catalog schema."""
+import importlib.metadata as md
+import logging
+import subprocess
+import sys
+
+logger = logging.getLogger(__name__)
 
 # Package (distribution names accepted) -> minimum version. databricks-sdk >= 0.102 provides the Lakebase
 # Autoscaling API (`w.postgres`).
 NEEDED = {"psycopg2-binary": ((2, 9), ("psycopg2-binary", "psycopg2")), "databricks-sdk": ((0, 102), ("databricks-sdk",))}
 
 
-def _as_tuple(text):
+def _as_tuple(text: str) -> tuple:
+    """Parse the major and minor parts of a dotted version.
+
+    :param text: Version string such as ``"2.9.10"``.
+    :return: Tuple of the first two numeric components, e.g. ``(2, 9)``.
+    """
     return tuple(int(x) for x in text.split(".")[:2] if x.isdigit())
 
 
-def _installed(names):
+def _installed(names: tuple) -> "str | None":
+    """Look up the installed version of a package under any of its distribution names.
+
+    :param names: Distribution names to try, in order.
+    :return: Version of the first name found, or None when none is installed.
+    """
     for name in names:
         try:
             return md.version(name)
@@ -78,7 +94,7 @@ if missing:
         f.write("\n".join(pins))
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-c", "/tmp/pinned_packages.txt", *missing])
     dbutils.library.restartPython()
-print({pkg: _installed(names) for pkg, (_, names) in NEEDED.items()})
+logger.info("%s", {pkg: _installed(names) for pkg, (_, names) in NEEDED.items()})
 
 # COMMAND ----------
 
@@ -124,23 +140,42 @@ SIMPLE_TYPES = {
 DECIMAL_MAX_PRECISION = 38
 
 
-def parse_list(text):
-    """Comma-separated parameter -> list of non-empty stripped items."""
+def parse_list(text: "str | None") -> list:
+    """Split a comma-separated parameter.
+
+    :param text: Raw widget value; None is treated as empty.
+    :return: Non-empty stripped items, in order.
+    """
     return [item.strip() for item in (text or "").split(",") if item.strip()]
 
 
-def is_system_schema(schema):
+def is_system_schema(schema: str) -> bool:
+    """Tell whether a Postgres schema is a system schema.
+
+    :param schema: Postgres schema name.
+    :return: True for ``information_schema`` and any ``pg_*`` schema.
+    """
     return schema in SYSTEM_SCHEMAS or schema.startswith("pg_")
 
 
-def matches(schema, table, selectors):
-    """True if `table` or `schema.table` is in the selectors (case-insensitive)."""
+def matches(schema: str, table: str, selectors: list) -> bool:
+    """Tell whether a table is named by a selector list.
+
+    :param schema: Postgres schema of the table.
+    :param table: Table name.
+    :param selectors: Items of the form ``table`` or ``schema.table``.
+    :return: True if ``table`` or ``schema.table`` is in the selectors (case-insensitive).
+    """
     keys = {s.lower() for s in selectors}
     return table.lower() in keys or f"{schema}.{table}".lower() in keys
 
 
-def map_pg_type(pg_type):
-    """Postgres type as returned by format_type() (e.g. 'numeric(10,2)', 'integer[]') -> Spark SQL type."""
+def map_pg_type(pg_type: str) -> str:
+    """Map a Postgres type to a Spark SQL type.
+
+    :param pg_type: Type as returned by ``format_type()``, e.g. ``numeric(10,2)`` or ``integer[]``.
+    :return: Spark SQL type; ``STRING`` for any type without a faithful Spark equivalent.
+    """
     pg_type = pg_type.strip().lower()
     if pg_type.endswith("[]"):
         return f"ARRAY<{map_pg_type(pg_type[:-2])}>"
@@ -158,7 +193,12 @@ def map_pg_type(pg_type):
     return "STRING"                                  # text, varchar, uuid, json(b), enums, time, interval, inet…
 
 
-def _to_text(value):
+def _to_text(value: object) -> str:
+    """Render a psycopg2 value as text.
+
+    :param value: Python value read from Postgres.
+    :return: JSON for dicts and lists, hex for binary values, ``str(value)`` otherwise.
+    """
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, default=str)
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -166,8 +206,12 @@ def _to_text(value):
     return str(value)
 
 
-def make_converter(spark_type):
-    """Spark SQL type -> function converting a psycopg2 value into a value accepted by that Spark type."""
+def make_converter(spark_type: str):
+    """Build the value converter for a Spark type.
+
+    :param spark_type: Spark SQL type as returned by ``map_pg_type``.
+    :return: Function converting a psycopg2 value (None preserved) into a value accepted by that Spark type.
+    """
     if spark_type.startswith("ARRAY<"):
         element = make_converter(spark_type[len("ARRAY<"):-1])
         return lambda v: None if v is None else [element(x) for x in v]
@@ -184,18 +228,32 @@ def make_converter(spark_type):
     return lambda v: v                               # BOOLEAN, DATE, TIMESTAMP, TIMESTAMP_NTZ: native Python types
 
 
-def quote_ident(name):
-    """Spark identifier quoting."""
+def quote_ident(name: str) -> str:
+    """Quote a Spark identifier.
+
+    :param name: Raw identifier.
+    :return: Backtick-quoted identifier with embedded backticks doubled.
+    """
     return "`" + name.replace("`", "``") + "`"
 
 
-def spark_ddl(columns):
-    """[(column name, Spark type)] -> DDL schema string for spark.createDataFrame."""
+def spark_ddl(columns: list) -> str:
+    """Build the DDL schema string for ``spark.createDataFrame``.
+
+    :param columns: ``(column name, Spark type)`` pairs.
+    :return: Comma-separated ``name type`` DDL with quoted names.
+    """
     return ", ".join(f"{quote_ident(name)} {spark_type}" for name, spark_type in columns)
 
 
-def resolve_target_names(tables, pattern):
-    """[(schema, table)] -> {(schema, table): target table name}; raises on collisions or an invalid pattern."""
+def resolve_target_names(tables: list, pattern: str) -> dict:
+    """Compute the target table name of every source table.
+
+    :param tables: ``(schema, table)`` pairs.
+    :param pattern: Name pattern with ``{table}`` (required) and optional ``{schema}`` placeholders.
+    :return: Mapping ``(schema, table)`` -> target table name.
+    :raises ValueError: if the pattern lacks ``{table}`` or two tables map to the same name.
+    """
     if "{table}" not in pattern:
         raise ValueError(f"target_table_name must contain {{table}}: {pattern!r}")
     names = {(s, t): pattern.format(schema=s, table=t) for s, t in tables}
@@ -268,7 +326,7 @@ conn = psycopg2.connect(host=host, port=5432, dbname=PARAMS["lakebase_database"]
                         sslmode="require", application_name="lakebase_to_uc_copy")
 # One read-only snapshot for every table: related tables (e.g. messages and feedbacks) stay consistent.
 conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
-print(f"Connected to {source_label} / database {PARAMS['lakebase_database']} as {PG_USER}")
+logger.info("Connected to %s / database %s as %s", source_label, PARAMS["lakebase_database"], PG_USER)
 
 # COMMAND ----------
 
@@ -309,11 +367,11 @@ with conn.cursor() as cur:
         """, (oid,))
         COLUMNS[(schema, table)] = [(name, pg_type, map_pg_type(pg_type)) for name, pg_type in cur.fetchall()]
 
-print(f"{len(selected)} table(s) to copy -> {TARGET_CATALOG}.{TARGET_SCHEMA}")
+logger.info("%d table(s) to copy -> %s.%s", len(selected), TARGET_CATALOG, TARGET_SCHEMA)
 for _, s, t in selected:
-    print(f"  {s}.{t} -> {TARGET_NAMES[(s, t)]} ({len(COLUMNS[(s, t)])} columns)")
+    logger.info("  %s.%s -> %s (%d columns)", s, t, TARGET_NAMES[(s, t)], len(COLUMNS[(s, t)]))
 if skipped:
-    print(f"Skipped: {skipped}")
+    logger.info("Skipped: %s", skipped)
 
 # COMMAND ----------
 
@@ -325,16 +383,32 @@ if PARAMS["create_target_schema"] == "true":
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {TARGET_PREFIX}")
 
 
-def sql_string(text):
-    """Escapes a Spark SQL string literal."""
+def sql_string(text: str) -> str:
+    """Escape text for a single-quoted Spark SQL string literal.
+
+    :param text: Raw text.
+    :return: Text with backslashes and single quotes escaped.
+    """
     return text.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def pg_ident(name):
+def pg_ident(name: str) -> str:
+    """Quote a Postgres identifier.
+
+    :param name: Raw identifier.
+    :return: Double-quoted identifier with embedded quotes doubled.
+    """
     return '"' + name.replace('"', '""') + '"'
 
 
-def copy_table(schema, table):
+def copy_table(schema: str, table: str) -> int:
+    """Copy one Postgres table into its Delta target, replacing it atomically.
+
+    :param schema: Source Postgres schema.
+    :param table: Source table name.
+    :return: Number of rows copied.
+    :raises RuntimeError: if the written row count differs from the read count.
+    """
     columns = COLUMNS[(schema, table)]
     ddl = spark_ddl([(name, spark_type) for name, _, spark_type in columns])
     converters = [make_converter(spark_type) for _, _, spark_type in columns]
@@ -375,11 +449,11 @@ try:
         try:
             n_rows = copy_table(schema, table)
             results.append((f"{schema}.{table}", target_name, "OK", n_rows, round(time.time() - started, 1), None))
-            print(f"  {schema}.{table}: {n_rows} row(s) -> {target_name}")
+            logger.info("  %s.%s: %d row(s) -> %s", schema, table, n_rows, target_name)
         except Exception as error:   # one failing table must not stop the others
             results.append((f"{schema}.{table}", target_name, "FAILED", None, round(time.time() - started, 1),
                             str(error)[:2000]))
-            print(f"  {schema}.{table}: FAILED — {error}")
+            logger.error("  %s.%s: FAILED — %s", schema, table, error)
 finally:
     conn.close()
 
@@ -391,6 +465,7 @@ summary = spark.createDataFrame(
 display(summary)
 
 failed = [r for r in results if r[2] == "FAILED"]
-print(f"Done: {len(results) - len(failed)} table(s) copied, {len(failed)} failed, into {TARGET_CATALOG}.{TARGET_SCHEMA}")
+logger.info("Done: %d table(s) copied, %d failed, into %s.%s",
+            len(results) - len(failed), len(failed), TARGET_CATALOG, TARGET_SCHEMA)
 if failed:
     raise RuntimeError(f"{len(failed)} table(s) failed: {[r[0] for r in failed]}")

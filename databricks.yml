@@ -28,12 +28,16 @@ variables:
     description: The write schema
     default: latlang
 
-  # Databricks group with access to this app. TODO: swap this for a
-  # dedicated "Role-Project-LEAP-End-users-LatLang" group once created —
-  # temporarily reusing the sibling Qualibot/DocCompare app's end-users
-  # group (2026-08-24) so real end users can be granted CAN_USE now.
+  # Databricks group granted CAN_USE on the app. Until a dedicated LatLang group exists it is the end-users group of Qualibot DocCompare.
   end_users_group:
     default: "Role-Project-LEAP-End-users-Qualibot-DocCompare"
+
+  notification_email:
+    description: "Recipient of the failure notifications of every job"
+    default: "jules.gourio.external@latecoere.aero"
+  job_activity_tag:
+    description: "activity-type tag of every job, <env>-job"
+    default: "dev-job"
 
 sync:
   include:
@@ -104,97 +108,9 @@ targets:
     workspace:
       host: https://dbc-3a17bfce-9e88.cloud.databricks.com
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
-    resources:
-      jobs:
-        grant_volume_access:
-          name: "latlang-grant-volume-access-${bundle.target}"
-          description: "Grants USE CATALOG + USE SCHEMA, READ VOLUME on read_volumes and READ + WRITE VOLUME on write_volumes to a service principal (the app's own). Manual trigger only."
-          max_concurrent_runs: 1
-          run_as:
-            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
-          parameters:
-            - name: service_principal
-              default: ""
-            - name: catalog
-              default: ${var.app_write_catalog}
-            - name: schema_name
-              default: ${var.app_write_schema}
-            - name: read_volumes
-              default: "binaries"
-            - name: write_volumes
-              default: "documents"
-          tasks:
-            - task_key: grant
-              notebook_task:
-                notebook_path: ./utils/databricks_ops/grant_volume_access_job.py
-                source: WORKSPACE
-                base_parameters:
-                  service_principal: "{{job.parameters.service_principal}}"
-                  catalog: "{{job.parameters.catalog}}"
-                  schema_name: "{{job.parameters.schema_name}}"
-                  read_volumes: "{{job.parameters.read_volumes}}"
-                  write_volumes: "{{job.parameters.write_volumes}}"
-              environment_key: default
-          environments:
-            - environment_key: default
-              spec:
-                environment_version: "2"
-        # Weekday-only start/stop schedule — app stays RUNNING only 8h-19h
-        # Europe/Paris, Mon-Fri, to save cost outside business hours. Never
-        # deployed to dev (dev app is intentionally left off) or prod (not
-        # requested).
-        start_app:
-          name: "WD_0_latlang_start_app_${bundle.target}"
-          description: "Starts the latlang app every weekday morning."
-          max_concurrent_runs: 1
-          run_as:
-            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
-          schedule:
-            quartz_cron_expression: "0 0 8 ? * MON-FRI"
-            timezone_id: "Europe/Paris"
-            pause_status: UNPAUSED
-          tasks:
-            - task_key: start_app
-              notebook_task:
-                notebook_path: ./utils/databricks_ops/app_lifecycle_job.py
-                source: WORKSPACE
-                base_parameters:
-                  app_name: ${var.app_name}
-                  action: start
-              environment_key: default
-          environments:
-            - environment_key: default
-              spec:
-                environment_version: "2"
-                dependencies:
-                  - databricks-sdk>=0.118.0
-        stop_app:
-          name: "WD_1_latlang_stop_app_${bundle.target}"
-          description: "Stops the latlang app every weekday evening."
-          max_concurrent_runs: 1
-          run_as:
-            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39
-          schedule:
-            quartz_cron_expression: "0 0 19 ? * MON-FRI"
-            timezone_id: "Europe/Paris"
-            pause_status: UNPAUSED
-          tasks:
-            - task_key: stop_app
-              notebook_task:
-                notebook_path: ./utils/databricks_ops/app_lifecycle_job.py
-                source: WORKSPACE
-                base_parameters:
-                  app_name: ${var.app_name}
-                  action: stop
-              environment_key: default
-          environments:
-            - environment_key: default
-              spec:
-                environment_version: "2"
-                dependencies:
-                  - databricks-sdk>=0.118.0
     variables:
       app_write_catalog: uat_proj
+      job_activity_tag: uat-job
 
   latlang-prod:
     mode: production
@@ -203,3 +119,4 @@ targets:
       root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
     variables:
       app_write_catalog: prod_proj
+      job_activity_tag: prod-job

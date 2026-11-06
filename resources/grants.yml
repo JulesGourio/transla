@@ -1,0 +1,56 @@
+# Manual job that gives the app's service principal its rights on the volumes of <catalog>.<schema>.
+# Notebook: utils/databricks_ops/grant_volume_access_job.py. Declared for every target; without run_as it runs as the deploying
+# user, who needs MANAGE on the catalog. Terraform grants are avoided on purpose: they are authoritative and would wipe these.
+
+resources:
+  jobs:
+    grant_volume_access:
+      name: "latlang-grant-volume-access-${bundle.target}"
+      description: "Grants USE CATALOG + USE SCHEMA, READ VOLUME on read_volumes and READ + WRITE VOLUME on write_volumes to a service principal (the app's own). Manual trigger only."
+      max_concurrent_runs: 1
+      queue:
+        enabled: true
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      notification_settings:
+        no_alert_for_canceled_runs: true
+      tags:
+        activity-type: ${var.job_activity_tag}
+        job-purpose: grant-volume-access
+        project-name: latlang
+      parameters:
+        - name: service_principal
+          default: ""
+        - name: catalog
+          default: ${var.app_write_catalog}
+        - name: schema_name
+          default: ${var.app_write_schema}
+        - name: read_volumes
+          default: "binaries"
+        - name: write_volumes
+          default: "documents"
+      tasks:
+        - task_key: grant
+          notebook_task:
+            notebook_path: ../utils/databricks_ops/grant_volume_access_job.py
+            source: WORKSPACE
+            base_parameters:
+              service_principal: "{{job.parameters.service_principal}}"
+              catalog: "{{job.parameters.catalog}}"
+              schema_name: "{{job.parameters.schema_name}}"
+              read_volumes: "{{job.parameters.read_volumes}}"
+              write_volumes: "{{job.parameters.write_volumes}}"
+          environment_key: default
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "2"
+
+targets:
+  latlang-uat:
+    resources:
+      jobs:
+        grant_volume_access:
+          run_as:
+            service_principal_name: 3e5cd4e5-f765-4760-b974-ee7715258b39

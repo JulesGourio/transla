@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Deploy DEV (code only)",
+      "detail": "Frontend build, sync and app deploy to DEV",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File utils/deploy/deploy_latlang.ps1 -AppEnv dev",
+      "problemMatcher": []
+    },
+    {
+      "label": "Deploy UAT (code only)",
+      "detail": "Frontend build, sync and app deploy to UAT. Ask the owner first.",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File utils/deploy/deploy_latlang.ps1 -AppEnv uat",
+      "problemMatcher": []
+    },
+    {
+      "label": "Tests (backend)",
+      "type": "shell",
+      "command": "python -m pytest -q tests",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}

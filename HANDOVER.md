@@ -152,7 +152,7 @@ Remove-Item Env:DATABRICKS_TOKEN -ErrorAction SilentlyContinue
 .\utils\deploy\deploy_latlang.ps1 -AppEnv uat -SkipBuild
 ```
 
-Une modification du frontend : même commande **sans** `-SkipBuild` (le script lance `bun install` et `bun run build`).
+Une modification du frontend : même commande **sans** `-SkipBuild` (le script lance `bun install --frozen-lockfile` et `bun run build`).
 
 Une modification de `databricks.yml`, de `resources/` (jobs, permissions, volumes) : ajouter `-Infra`.
 

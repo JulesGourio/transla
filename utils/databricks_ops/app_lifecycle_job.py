@@ -8,7 +8,12 @@
 
 # COMMAND ----------
 
+"""Notebook entry point that starts or stops a Databricks App."""
+import logging
+
 from databricks.sdk import WorkspaceClient
+
+logger = logging.getLogger(__name__)
 
 dbutils.widgets.text("app_name", "", "App name")
 dbutils.widgets.dropdown("action", "start", ["start", "stop"], "Action")
@@ -20,10 +25,10 @@ assert app_name, "app_name widget is required"
 
 w = WorkspaceClient()
 
-print(f"{action}ing app '{app_name}'...")
+logger.info("%sing app '%s'...", action, app_name)
 if action == "start":
     w.apps.start(name=app_name).result()
 else:
     w.apps.stop(name=app_name).result()
 
-print(f"App '{app_name}' {action} completed.")
+logger.info("App '%s' %s completed.", app_name, action)

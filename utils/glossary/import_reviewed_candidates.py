@@ -1,9 +1,8 @@
 """Importeur candidats revus → glossary_terms (Lakebase).
 
-Comble le trou de schéma constaté le 2026-07-16 : les CSV de candidats
-(`Translator/glossary/candidates/review_batch_*.csv`, `index_terms_*.csv`,
-`candidates_*.csv`) n'avaient AUCUN chemin scripté vers `glossary_terms` —
-même après revue humaine. Ce script :
+Les CSV de candidats (`Translator/glossary/candidates/review_batch_*.csv`,
+`index_terms_*.csv`, `candidates_*.csv`) passent par ce script pour atteindre
+`glossary_terms` après revue humaine. Il :
 
 1. lit un ou plusieurs CSV de candidats (délimiteur ';', colonnes de langue
    détectées parmi fr/en/cs/bg/de/es, + definition/definition_source),
@@ -24,19 +23,28 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / 'utils' / 'databricks_ops' / 'lakebase_sync'))
 
-from .build_review_batch import _norm  # même normalisation que la dédup amont
+from .build_review_batch import _norm  # same normalisation as the upstream dedup
 
 LANGS = ('en', 'fr', 'cs', 'bg', 'de', 'es')
 APPROVED = {'approved', 'approve', 'ok', 'valid', 'valide', 'validé', 'validated', 'oui', 'yes'}
 
+logger = logging.getLogger(__name__)
+
 
 def load_candidates(paths: list[Path]) -> list[dict]:
+    """Read the approved rows of reviewed candidate CSVs (delimiter ';').
+
+    :param paths: CSV files with at least one language column.
+    :return: One dict per approved row having a term: a value per language in ``LANGS``, ``definition``,
+        ``definition_source``, ``notes`` and ``_file`` (source file name). Files without a language column are skipped.
+    """
     rows: list[dict] = []
     for path in paths:
         with path.open('r', encoding='utf-8-sig', newline='') as f:
@@ -44,7 +52,7 @@ def load_candidates(paths: list[Path]) -> list[dict]:
             fields = [c.strip().lower() for c in (reader.fieldnames or [])]
             lang_cols = [c for c in fields if c in LANGS]
             if not lang_cols:
-                print(f'  {path.name}: aucune colonne de langue ({fields}) — ignoré')
+                logger.warning('  %s: aucune colonne de langue (%s) — ignoré', path.name, fields)
                 continue
             n_total = n_kept = 0
             for raw in reader:
@@ -63,11 +71,12 @@ def load_candidates(paths: list[Path]) -> list[dict]:
                     'notes': row.get('sources') or row.get('source') or '',
                     '_file': path.name,
                 })
-            print(f'  {path.name}: {n_kept}/{n_total} ligne(s) approuvée(s)')
+            logger.info('  %s: %d/%d ligne(s) approuvée(s)', path.name, n_kept, n_total)
     return rows
 
 
 def main() -> None:
+    """Command-line entry point: import approved candidates into ``glossary_terms``."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('csvs', nargs='+', type=Path, help='CSV de candidats revus')
     ap.add_argument('--env', choices=['DEV', 'UAT', 'UAT-TEST'], default='UAT-TEST',
@@ -77,11 +86,11 @@ def main() -> None:
 
     candidates = load_candidates([p for p in args.csvs])
     if not candidates:
-        print('Aucune ligne approuvée — rien à importer (les lignes restent status=pending tant que la revue humaine n\'est pas faite).')
+        logger.info('Aucune ligne approuvée — rien à importer (les lignes restent status=pending tant que la revue humaine n\'est pas faite).')
         return
 
     from migrate_lakebase import sdk_lakebase_connect
-    print(f'Connexion Lakebase {args.env}…')
+    logger.info('Connexion Lakebase %s…', args.env)
     conn = sdk_lakebase_connect(args.env)
     try:
         with conn.cursor() as cur:
@@ -102,16 +111,16 @@ def main() -> None:
             next_id += 1
             to_import.append(c)
 
-        print(f'{len(candidates)} approuvés, {skipped} déjà au glossaire, {len(to_import)} à importer')
+        logger.info('%d approuvés, %d déjà au glossaire, %d à importer', len(candidates), skipped, len(to_import))
         for c in to_import[:15]:
             langs = ' | '.join(f'{l}={c[l]}' for l in LANGS if c[l])
-            print(f"  {c['term_id']}: {langs}"
-                  + (f"  [déf: {c['definition'][:50]}… ({c['definition_source']})]" if c['definition'] else ''))
+            logger.info('  %s: %s%s', c['term_id'], langs,
+                        f"  [déf: {c['definition'][:50]}… ({c['definition_source']})]" if c['definition'] else '')
         if len(to_import) > 15:
-            print(f'  … et {len(to_import) - 15} de plus')
+            logger.info('  … et %d de plus', len(to_import) - 15)
 
         if not args.apply:
-            print('\nDRY-RUN — rien écrit. Relancer avec --apply pour importer.')
+            logger.info('\nDRY-RUN — rien écrit. Relancer avec --apply pour importer.')
             return
 
         with conn.cursor() as cur:
@@ -131,7 +140,7 @@ def main() -> None:
                      c['definition'], c['definition_source']),
                 )
         conn.commit()
-        print(f'Importé {len(to_import)} terme(s) dans glossary_terms ({args.env}).')
+        logger.info('Importé %d terme(s) dans glossary_terms (%s).', len(to_import), args.env)
     except Exception:
         conn.rollback()
         raise
@@ -140,4 +149,5 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

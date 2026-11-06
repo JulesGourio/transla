@@ -19,18 +19,20 @@ preserve the source SERIAL ids explicitly).
 """
 import datetime
 import json
+import logging
 from decimal import Decimal
 
 import psycopg2
 import psycopg2.extras
 from databricks.sdk import WorkspaceClient
 
+logger = logging.getLogger(__name__)
+
 dbutils.widgets.text("LAKEBASE_PROJECT_ID", "qualibot")
 dbutils.widgets.text("LAKEBASE_BRANCH", "production")
 dbutils.widgets.text("LAKEBASE_ENDPOINT", "primary")
 dbutils.widgets.text("SOURCE_LAKEBASE_DATABASE", "doccompare")
-# Safe-by-default: never overwrite the real latlang until the migration has
-# been validated end-to-end on latlang_test.
+# Defaults to the test database so the real latlang is never overwritten by accident.
 dbutils.widgets.text("TARGET_LAKEBASE_DATABASE", "latlang_test")
 
 LAKEBASE_PROJECT_ID = dbutils.widgets.get("LAKEBASE_PROJECT_ID")
@@ -58,7 +60,12 @@ TABLES_IN_ORDER = [
 ]
 
 
-def json_default(obj):
+def json_default(obj: object) -> object:
+    """Serialize values that ``json.dumps`` cannot handle natively.
+
+    :param obj: Value rejected by the JSON encoder.
+    :return: ISO string for dates and datetimes, float for ``Decimal``, ``str(obj)`` otherwise.
+    """
     if isinstance(obj, (datetime.date, datetime.datetime)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
@@ -85,7 +92,12 @@ if not credential.token:
     raise RuntimeError("generate_database_credential a retourné un token vide.")
 
 
-def connect(database: str):
+def connect(database: str) -> "psycopg2.extensions.connection":
+    """Open a TLS connection to the shared Lakebase host.
+
+    :param database: Name of the Postgres database to connect to.
+    :return: Open psycopg2 connection authenticated with the current user's OAuth token.
+    """
     return psycopg2.connect(
         host=lakebase_host, port=5432, database=database,
         user=username, password=credential.token, sslmode="require",
@@ -102,7 +114,7 @@ try:
             rows = [dict(r) for r in cur.fetchall()]
 
         if not rows:
-            print(f"  {table}: 0 ligne — rien à migrer")
+            logger.info("  %s: 0 ligne — rien à migrer", table)
             continue
 
         columns = list(rows[0].keys())
@@ -123,8 +135,7 @@ try:
             psycopg2.extras.execute_batch(cur, insert_sql, values)
         dst.commit()
 
-        # Keep SERIAL sequences in sync with the copied ids, or the next
-        # INSERT ... DEFAULT in the app collides with a migrated row.
+        # Sequences must follow the copied ids or the next DEFAULT insert collides.
         with dst.cursor() as cur:
             cur.execute(
                 f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
@@ -132,9 +143,9 @@ try:
             )
         dst.commit()
 
-        print(f"  {table}: {len(rows)} ligne(s) migrée(s)")
+        logger.info("  %s: %d ligne(s) migrée(s)", table, len(rows))
 
-    print(f"\nTerminé — {SOURCE_LAKEBASE_DATABASE} -> {TARGET_LAKEBASE_DATABASE}")
+    logger.info("Terminé — %s -> %s", SOURCE_LAKEBASE_DATABASE, TARGET_LAKEBASE_DATABASE)
 finally:
     src.close()
     dst.close()

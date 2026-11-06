@@ -1,6 +1,6 @@
 # resources
 
-Databricks jobs declared as part of the bundle. [databricks.yml](../databricks.yml) includes `resources/*.yml`.
+Databricks jobs declared as part of the bundle, one file per concern. [databricks.yml](../databricks.yml) includes `resources/*.yml`.
 
 Parent: [root README](../README.md).
 
@@ -8,7 +8,14 @@ Parent: [root README](../README.md).
 
 | File | Content |
 |---|---|
+| `grants.yml` | The manual job `latlang-grant-volume-access-<target>`, declared for every target |
+| `app_schedules.yml` | The jobs `WD_0_latlang_start_app_latlang-uat` and `WD_1_latlang_stop_app_latlang-uat`: start at 08:00 and stop at 19:00, Monday to Friday, Paris time (UAT only) |
 | `lakebase_copy.yml` | The job `D_0_latlang-lakebase-copy-latlang-uat`: copies the `latlang` Lakebase database to Delta tables every night at 02:00 (Europe/Paris) |
+
+## Job format
+
+Every job sets `queue`, an `on_failure` e-mail to `${var.notification_email}`, `no_alert_for_canceled_runs`, and the tags
+`activity-type` (`${var.job_activity_tag}`, `<env>-job`), `job-purpose` and `project-name`. The tests check it.
 
 ## lakebase_copy.yml
 
@@ -25,17 +32,12 @@ Requirements, all outside the job file:
 The Delta tables carry the names of the Postgres tables (`translation_jobs`, `translation_segments`, `glossary_terms`,
 ...). They are for analysis and backup; the application never reads them.
 
-## Other jobs of the bundle
+## grants.yml and app_schedules.yml
 
-`databricks.yml`, in the `latlang-uat` target, declares three more jobs:
-
-| Job | Does |
-|---|---|
-| `latlang-grant-volume-access-latlang-uat` | Manual. Grants the app's service principal its rights on the volumes |
-| `WD_0_latlang_start_app_latlang-uat` | Starts the app at 08:00, Monday to Friday, Paris time |
-| `WD_1_latlang_stop_app_latlang-uat` | Stops it at 19:00 on the same days |
-
-The jobs run as the UAT job service principal, which holds `CAN_MANAGE` on the app so it can start and stop it.
+The grant job gives the app's service principal `USE CATALOG`, `USE SCHEMA`, `READ VOLUME` on `binaries` and `READ VOLUME` +
+`WRITE VOLUME` on `documents`. Without `run_as` (DEV) it runs as the user who starts it, who needs `MANAGE` on the catalog;
+in UAT it runs as the UAT job service principal. The start and stop jobs run as that service principal, which holds
+`CAN_MANAGE` on the app.
 
 ## See also
 

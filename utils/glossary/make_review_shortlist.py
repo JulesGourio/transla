@@ -22,13 +22,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
+from collections import Counter
 from pathlib import Path
 
 LANGS = ('fr', 'en', 'cs', 'bg', 'de', 'es')
 CANDIDATES_DIR = Path(__file__).resolve().parent.parent.parent / 'Translator' / 'glossary' / 'candidates'
 
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
+    """Command-line entry point: merge the pending review batches into one prioritised shortlist CSV."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--min-docs', type=int, default=2,
                     help='seuil de confirmation multi-documents (défaut : 2)')
@@ -70,8 +75,7 @@ def main() -> None:
                     'status': 'pending',
                 })
 
-    # Dédoublonner un même couple apparu dans plusieurs lots (garde la
-    # meilleure priorité / le plus de docs).
+    # A pair can appear in several batches: keep the best priority, then the most documents.
     best: dict[tuple, dict] = {}
     for r in rows:
         key = tuple((r[c] or '').strip().lower() for c in LANGS)
@@ -89,13 +93,13 @@ def main() -> None:
         w.writeheader()
         w.writerows(final)
 
-    from collections import Counter
     counts = Counter(r['priority'] for r in final)
-    print(f'{len(final)} candidat(s) dans la shortlist -> {args.out}')
-    print(f"  P1 (>= {args.min_docs} docs + définition corroborée) : {counts.get(1, 0)}")
-    print(f'  P2 (définition corroborée seule)                 : {counts.get(2, 0)}')
-    print(f'  P3 (>= {args.min_docs} docs)                            : {counts.get(3, 0)}')
+    logger.info('%d candidat(s) dans la shortlist -> %s', len(final), args.out)
+    logger.info('  P1 (>= %d docs + définition corroborée) : %d', args.min_docs, counts.get(1, 0))
+    logger.info('  P2 (définition corroborée seule)                 : %d', counts.get(2, 0))
+    logger.info('  P3 (>= %d docs)                            : %d', args.min_docs, counts.get(3, 0))
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

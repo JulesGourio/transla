@@ -1,10 +1,8 @@
 """User service — resolve the current user's identity from request headers.
 
-There is no capability matrix here: this app does one thing, and access is
-gated at the Databricks App level (workspace group permissions on the app
-resource), not per-feature in application code. `require_translate` is kept
-as a no-op dependency purely so the translate.py router's
-`Depends(require_translate)` call sites need no edits.
+Access is gated at the Databricks App level (workspace group permissions on
+the app resource), not per feature in application code, so there is no
+capability matrix. `require_translate` accepts every request.
 """
 
 import asyncio
@@ -27,11 +25,19 @@ _dev_user_cache: Optional[str] = None
 
 
 def _is_dev() -> bool:
+    """Tell whether the app runs in local development.
+
+    :return: True when the ENV variable is ``development`` (the default).
+    """
     return os.getenv('ENV', 'development') == 'development'
 
 
 def _is_real_email(value: str) -> bool:
-    """True if value looks like a real email (not a numeric Databricks workspace-scoped ID)."""
+    """Tell whether a value is a real email rather than a numeric Databricks workspace-scoped ID.
+
+    :param value: Raw ``x-forwarded-user`` header value.
+    :return: True when the value has an ``@`` and is not ``<digits>@<digits>``.
+    """
     if '@' not in value:
         return False
     local, _, domain = value.partition('@')
@@ -39,7 +45,10 @@ def _is_real_email(value: str) -> bool:
 
 
 def get_workspace_url() -> str:
-    """Return the Databricks workspace base URL."""
+    """Return the Databricks workspace base URL.
+
+    :return: ``https://host`` without trailing slash, or an empty string when the host cannot be resolved.
+    """
     host = os.getenv('DATABRICKS_HOST', '')
     if not host:
         try:
@@ -56,12 +65,13 @@ def get_workspace_url() -> str:
 
 
 async def get_current_user(request: Request) -> str:
-    """Return the authenticated user's email or numeric user_id.
+    """Return the authenticated user's email, or the numeric part of their Databricks ID.
 
-    Resolution order:
-    1. x-forwarded-user — real email → use directly
-    2. x-forwarded-user — numeric Databricks ID → return the numeric part
-    3. WorkspaceClient.current_user.me() — local development only
+    Falls back to the SDK's current user in local development only.
+
+    :param request: Incoming request carrying the ``x-forwarded-user`` header.
+    :return: The user's email or numeric user id.
+    :raises ValueError: When no identity can be found outside development.
     """
     forwarded = request.headers.get('x-forwarded-user', '').strip()
     if forwarded and _is_real_email(forwarded):
@@ -74,7 +84,11 @@ async def get_current_user(request: Request) -> str:
 
 
 async def get_user_identity(request: Request) -> UserIdentity:
-    """Return the split user_id, workspace_id, and email from the request headers."""
+    """Split the forwarded user header into user id, workspace id and email.
+
+    :param request: Incoming request carrying the ``x-forwarded-user`` header.
+    :return: The identity; ``user_id`` is empty when no header is present outside development.
+    """
     forwarded = request.headers.get('x-forwarded-user', '').strip()
 
     if not forwarded:
@@ -94,11 +108,18 @@ async def get_user_identity(request: Request) -> UserIdentity:
 
 
 async def require_translate(request: Request) -> None:
-    """No-op dependency — access is gated at the Databricks App level, not here."""
-    return None
+    """Accept every request; access is gated at the Databricks App level.
+
+    :param request: Incoming request.
+    """
 
 
 async def _dev_user() -> str:
+    """Resolve and cache the SDK's current user name for local development.
+
+    :return: The user name, or the display name when absent.
+    :raises ValueError: When the SDK cannot determine the user.
+    """
     global _dev_user_cache
     if _dev_user_cache:
         return _dev_user_cache

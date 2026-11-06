@@ -36,6 +36,7 @@ Usage:  python audit.py <extract.json>
 
 from __future__ import annotations
 import json
+import logging
 import re
 import sys
 from collections import Counter, defaultdict
@@ -47,6 +48,9 @@ from .langdetect import (SUPPORTED_LANGS, detect_language,
 from .glossary_io import DntMatcher, load_dnt_matcher
 
 
+logger = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # Per-segment classification
 # ---------------------------------------------------------------------------
@@ -55,22 +59,15 @@ def make_audited(seg: dict, matcher: DntMatcher | None = None,
                  default_lang: str | None = None,
                  candidates: set[str] | None = None,
                  source_lang: str | None = None) -> dict:
-    """matcher applies reviewer-curated dnt_rules (exact/prefix/glob/regex,
-    edited by hand in the glossary panel) on top of the built-in DNT_REGEX
-    (dates/part numbers/standards) — both decide DNT status live, here,
-    rather than the old flow where a per-job Q&A had to "confirm" tokens
-    already-caught-by-regex into a one-off exact-match row that never helped
-    a later job. Defaults to None (CSV/no custom rules) for the CLI.
+    """Classify one extracted segment into an audited-segment dict.
 
-    default_lang: the document's own dominant language, passed through as the
-    tie-break/no-signal fallback — see audit_all_segments()'s two-pass call
-    pattern (this function alone can't compute that bias, since it's a
-    per-segment call with no view of the rest of the document).
-
-    candidates: the job's declared {source_lang, target_lang} pair. When
-    given, the constrained ensemble detector (fastText + heuristic, restricted
-    to that pair) is used instead of the free 6-way heuristic — this is the
-    web pipeline's path. None keeps the standalone/CLI behaviour."""
+    :param seg: extracted segment dict (text, seg_id, location and run fields).
+    :param matcher: reviewer-curated DNT rules applied on top of the built-in DNT regex; None means built-in rules only.
+    :param default_lang: the document's dominant language, used as tie-break when the text carries no language signal; None means no bias.
+    :param candidates: language codes the detector may return (the job's declared pair plus languages found in the document); None means the free detector over all supported languages.
+    :param source_lang: the job's source language, used by the constrained detector to resolve ties; None means no preference.
+    :return: audited segment dict, including private underscore fields consumed by the pairing passes.
+    """
     text = seg["text"]
     if is_dnt_candidate(text, matcher):
         lang, conf = "??", 0.0
@@ -98,8 +95,7 @@ def make_audited(seg: dict, matcher: DntMatcher | None = None,
         "dnt_tokens": extract_dnt_tokens(text, matcher),
         "notes": "",
         "inline_split": None,
-        # We carry forward a few extract fields for the pairing logic;
-        # they're stripped from the final audit output below.
+        # Private fields feed the pairing logic and are stripped from the audit output.
         "_part": seg["part"],
         "_location": seg["location_type"],
         "_body_p_idx": seg["body_p_idx"],
@@ -111,21 +107,19 @@ def make_audited(seg: dict, matcher: DntMatcher | None = None,
     }
 
 
-# A segment's detected language is trusted as a genuine, translate-or-keep
-# decision signal only at/above this confidence. Constrained detection only
-# reports >= this when BOTH the heuristic and fastText agree (see
-# langdetect.detect_language_constrained) — a single confident-but-maybe-wrong
-# detector is capped below it on purpose.
+# Minimum confidence for a detection to decide translate-or-keep. Constrained
+# detection reaches it only when both the heuristic and fastText agree.
 CONFIDENT = 0.85
 
 
 def _significant_languages(audited: list[dict]) -> set[str]:
-    """Languages the document *actually* contains, by confident mono count.
-    Used to widen the detection candidate set beyond the declared pair — the
-    kept language is frequently a THIRD language (English part-number/label
-    text in a BG->FR or CS->FR job), not the declared target, and it must be a
-    detection candidate so those segments/spans are recognised and kept rather
-    than mislabelled or force-fit to the source."""
+    """Languages the document actually contains, by confident mono-segment count.
+
+    The kept language is often a third language (English labels in a BG->FR job), so it must be a detection candidate to be recognised and kept.
+
+    :param audited: audited segments from a first detection pass.
+    :return: language codes with at least 3 confident segments and at least 5% of all confident segments; empty when there are none.
+    """
     counts = Counter(
         a["detected_lang"] for a in audited
         if a["pattern_type"] == "mono" and a["detected_lang"] != "??"
@@ -140,21 +134,21 @@ def _significant_languages(audited: list[dict]) -> set[str]:
 def audit_all_segments(segments: list[dict], matcher: DntMatcher | None = None,
                        source_lang: str | None = None,
                        target_lang: str | None = None) -> list[dict]:
-    """Detect each mono segment's language, then two-pass bias the zero-signal
-    ones to the document dominant.
+    """Detect each mono segment's language and bias zero-signal segments to the document's dominant language.
 
-    Web pipeline (source/target given): a first pass over the FULL supported
-    set discovers which languages the document actually holds; detection is
-    then constrained to {source, target} ∪ those languages via the ensemble
-    detector (fastText + heuristic). Constraining tightly to the real language
-    set is what fixed both the ~50% low-confidence rate of the free heuristic
-    AND the case where the kept language is a third language (EN) rather than
-    the declared target. The CLI path (no pair) keeps the free heuristic."""
+    With source and target given, a first pass over every supported language discovers the languages the document holds, then detection is constrained to the pair plus those languages. Without a pair, the free heuristic detector is used.
+
+    :param segments: extracted segment dicts.
+    :param matcher: reviewer-curated DNT rules; None means built-in rules only.
+    :param source_lang: declared source language code; None selects the free detector.
+    :param target_lang: declared target language code; None selects the free detector.
+    :return: one audited segment dict per input segment, in the same order.
+    """
     if source_lang and target_lang:
-        # Pass A — full-set detection to learn the document's real languages.
+        # Pass A: full-set detection to learn the document's real languages.
         audited = [make_audited(s, matcher, candidates=set(SUPPORTED_LANGS)) for s in segments]
         candidates = {source_lang, target_lang} | _significant_languages(audited)
-        # Pass B — re-detect constrained to the pair + the doc's real languages.
+        # Pass B: re-detect constrained to the pair plus the document's languages.
         audited = [make_audited(s, matcher, candidates=candidates, source_lang=source_lang) for s in segments]
     else:
         candidates = None
@@ -174,16 +168,15 @@ def audit_all_segments(segments: list[dict], matcher: DntMatcher | None = None,
 
 
 def determine_mode(audited: list[dict], source_lang: str, target_lang: str) -> str:
-    """'monolingual' = the document is essentially all source language
-    (translate everything); 'bilingual' = it carries meaningful content in
-    ANOTHER language that must be kept (replace only the source side).
+    """Decide whether a document is monolingual or bilingual relative to the source language.
 
-    The other language is whatever is NOT the source — often a third language
-    (EN) rather than the declared target, so this compares source against
-    all-non-source confident content, NOT against the target (a BG->FR job on
-    a BG+EN document has zero FR, but is very much bilingual). Counts only
-    CONFIDENT (agreement-backed) detections so a few mislabeled cognate titles
-    can't flip the verdict."""
+    Compares source-language content against all confident non-source content, not against the target, because the kept language is often a third one. Only confident detections count.
+
+    :param audited: audited segments.
+    :param source_lang: source language code.
+    :param target_lang: target language code.
+    :return: "bilingual" when meaningful content in another language must be kept, otherwise "monolingual".
+    """
     src = sum(1 for a in audited if a["pattern_type"] == "mono"
               and a["detected_lang"] == source_lang and a["lang_confidence"] >= CONFIDENT)
     other = sum(1 for a in audited if a["pattern_type"] == "mono"
@@ -202,10 +195,17 @@ def determine_mode(audited: list[dict], source_lang: str, target_lang: str) -> s
 # ---------------------------------------------------------------------------
 
 class Pairer:
-    def __init__(self):
+    def __init__(self) -> None:
+        """Start the pair id counter at 1."""
         self.next_id = 1
 
     def assign(self, primary: dict, secondary: dict, pattern_type: str) -> None:
+        """Link two segments as one bilingual pair, unless either is already paired.
+
+        :param primary: segment taking the "primary" role; mutated in place.
+        :param secondary: segment taking the "secondary" role; mutated in place.
+        :param pattern_type: pattern label written on both segments.
+        """
         if primary["pair_id"] or secondary["pair_id"]:
             return
         pair_id = f"pair_{self.next_id:04d}"
@@ -217,8 +217,11 @@ class Pairer:
 
 
 def _format_groups(runs: list[dict]) -> list[tuple[str, str]]:
-    """Group consecutive runs by fmt_hash. Returns [(fmt_hash, joined_text), ...]
-    for non-empty fmt-groups (only counts groups whose text has any letters)."""
+    """Group consecutive runs sharing a format hash.
+
+    :param runs: run dicts with "fmt_hash" and "text" keys.
+    :return: (fmt_hash, joined_text) pairs for groups whose text is non-blank, in run order.
+    """
     if not runs:
         return []
     groups = []
@@ -238,7 +241,11 @@ def _format_groups(runs: list[dict]) -> list[tuple[str, str]]:
 
 
 def pair_txbx_siblings(audited: list[dict], pairer: Pairer) -> None:
-    """Pair consecutive paragraphs within the same text-box container."""
+    """Pair consecutive paragraphs of one text box that are in different languages.
+
+    :param audited: audited segments; paired members are mutated in place.
+    :param pairer: pair id allocator.
+    """
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for seg in audited:
         if seg["_location"] != "txbx" or seg["pair_id"]:
@@ -264,8 +271,11 @@ def pair_txbx_siblings(audited: list[dict], pairer: Pairer) -> None:
 
 
 def pair_adjacent_body(audited: list[dict], pairer: Pairer) -> None:
-    """Pair consecutive body_direct paragraphs in different languages, when
-    they're in the same XML part and adjacent by body_p_idx."""
+    """Pair body paragraphs in different languages that are adjacent (up to two empty paragraphs between) in the same XML part.
+
+    :param audited: audited segments; paired members are mutated in place.
+    :param pairer: pair id allocator.
+    """
     by_part: dict[str, list[dict]] = defaultdict(list)
     for seg in audited:
         if seg["_location"] != "body_direct" or seg["pair_id"]:
@@ -278,7 +288,6 @@ def pair_adjacent_body(audited: list[dict], pairer: Pairer) -> None:
         i = 0
         while i < len(segs) - 1:
             a, b = segs[i], segs[i + 1]
-            # Adjacent or near-adjacent (allow gap of empty paragraphs)
             gap = b["_body_p_idx"] - a["_body_p_idx"]
             if (1 <= gap <= 3
                     and a["detected_lang"] != b["detected_lang"]
@@ -292,7 +301,11 @@ def pair_adjacent_body(audited: list[dict], pairer: Pairer) -> None:
 
 
 def pair_table_rows(audited: list[dict], pairer: Pairer) -> None:
-    """Pair adjacent table rows where each row is uniformly one language."""
+    """Pair adjacent table rows that are each uniformly one language, cell by cell.
+
+    :param audited: audited segments; paired members are mutated in place.
+    :param pairer: pair id allocator.
+    """
     by_table: dict[tuple, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for seg in audited:
         if seg["_location"] != "table" or seg["pair_id"]:
@@ -335,7 +348,10 @@ SLASH_SPLIT_RE = re.compile(r"^(.+?)\s*/\s*(.+)$")
 
 
 def pair_inline_slash(audited: list[dict]) -> None:
-    """Mark mono segments that look like 'X / Y' with halves in different langs."""
+    """Mark mono segments shaped "X / Y" whose halves are in different languages.
+
+    :param audited: audited segments; matches are mutated in place (pattern_type and inline_split).
+    """
     for seg in audited:
         if seg["pair_id"] or seg["pattern_type"] != "mono":
             continue
@@ -361,8 +377,10 @@ def pair_inline_slash(audited: list[dict]) -> None:
 
 
 def pair_inline_format_concat(audited: list[dict]) -> None:
-    """Mark mono segments whose runs split into 2 fmt-groups detecting as
-    different languages."""
+    """Mark mono segments whose two largest format groups are in different languages.
+
+    :param audited: audited segments; matches are mutated in place (pattern_type and inline_split).
+    """
     for seg in audited:
         if seg["pair_id"] or seg["pattern_type"] != "mono":
             continue
@@ -390,9 +408,7 @@ def pair_inline_format_concat(audited: list[dict]) -> None:
                 "fmt_b": fmt_b,
                 "lang_a": lang_a,
                 "lang_b": lang_b,
-                # Side texts so the translation stage can send ONLY the
-                # source-language side to the LLM (the kept side must
-                # survive verbatim).
+                # Side texts let the translation stage send only the source-language side to the LLM.
                 "text_a": txt_a,
                 "text_b": txt_b,
             }
@@ -405,16 +421,13 @@ _UNIT_SUFFIX_RE = re.compile(r"\d[\d.,]*\s?([A-Za-z°µ]{1,3})(?![A-Za-z])")
 
 
 def _script_block_boundary(text: str) -> int | None:
-    """If the text's letters form one contiguous Cyrillic block followed by
-    one contiguous Latin block (or vice versa), return the offset where the
-    second block starts. None when scripts interleave or a side is trivial.
+    """Find where a Cyrillic block meets a Latin block (or vice versa) in a text.
 
-    A short Latin abbreviation glued to a digit (units like "35 Nm", "40 mm",
-    an ordinal "3rd") carries no language signal. Left uncounted, it gets
-    mistaken for the start of the Latin block whenever it sits at the tail of
-    an otherwise all-Cyrillic sentence that is itself followed by that
-    sentence's Latin-script echo - splitting the source text one word early
-    and stranding the unit on the kept (untranslated) side."""
+    Short Latin unit suffixes glued to a digit ("35 Nm", "3rd") carry no language signal and are ignored.
+
+    :param text: segment text.
+    :return: offset where the second script block starts, or None when scripts interleave or a side has fewer than two letters.
+    """
     unit_idx: set[int] = set()
     for m in _UNIT_SUFFIX_RE.finditer(text):
         unit_idx.update(range(m.start(1), m.end(1)))
@@ -438,13 +451,12 @@ def _script_block_boundary(text: str) -> int | None:
 
 
 def _find_char_boundary(text: str) -> tuple[int, str, str, float] | None:
-    """Find the language boundary of a two-language concatenation, or None.
+    """Find the language boundary of a two-language concatenation.
 
-    Returns (offset, left_lang, right_lang, min_confidence) with the offset
-    pointing at the first character of the right-hand span. Structural
-    signals only — a script switch (Bulgarian vs anything Latin, works even
-    with no punctuation) first, sentence boundaries otherwise. Interleaved
-    (A B A) or single-language texts return None and stay mono.
+    Uses structural signals only: a script switch first, sentence boundaries otherwise.
+
+    :param text: segment text.
+    :return: (offset of the right-hand span, left language, right language, minimum confidence), or None for single-language or interleaved text.
     """
     p = _script_block_boundary(text)
     if p is not None:
@@ -475,11 +487,10 @@ def _find_char_boundary(text: str) -> tuple[int, str, str, float] | None:
 
 
 def pair_inline_charspan(audited: list[dict]) -> None:
-    """Mark mono segments that concatenate two languages in the SAME run(s),
-    with no '/' separator and no formatting break — the case that fell
-    through pair_inline_slash/pair_inline_format_concat and got ONE
-    detect_language label for two languages' content, silently leaving the
-    outvoted language untranslated."""
+    """Mark mono segments concatenating two languages in the same runs, with no separator and no formatting break.
+
+    :param audited: audited segments; matches are mutated in place (pattern_type and inline_split).
+    """
     for seg in audited:
         if seg["pair_id"] or seg["pattern_type"] != "mono":
             continue
@@ -505,7 +516,11 @@ NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 
 def normalize_numbers(text: str) -> set[str]:
-    """Extract numbers normalized to use '.' as decimal separator."""
+    """Extract the numbers of a text with "." as decimal separator.
+
+    :param text: text to scan.
+    :return: set of number strings.
+    """
     out = set()
     for n in NUMBER_RE.findall(text):
         out.add(n.replace(",", "."))
@@ -513,7 +528,13 @@ def normalize_numbers(text: str) -> set[str]:
 
 
 def assess_pair(primary: dict, secondary: dict) -> None:
-    """Set richer_side, conflict_flag, conflict_detail on both members."""
+    """Set richer_side, conflict_flag and conflict_detail on both members of a pair.
+
+    Conflict reasons are worded for end users, not for engineers.
+
+    :param primary: primary pair member; mutated in place.
+    :param secondary: secondary pair member; mutated in place.
+    """
     # Richer side: more words wins (ties = "equal")
     wp = len(primary["text"].split())
     ws = len(secondary["text"].split())
@@ -524,10 +545,7 @@ def assess_pair(primary: dict, secondary: dict) -> None:
     else:
         richer = "equal"
 
-    # Conflict heuristics — reasons are kept in plain, non-technical language
-    # since these surface directly to end users who don't know (and don't
-    # need to know) what a "DNT token" or a "word-count ratio" is; the
-    # heuristics themselves are unchanged, only the wording shown for them.
+    # Reasons are shown to end users, so they avoid technical terms.
     reasons = []
     dnt_p, dnt_s = set(primary["dnt_tokens"]), set(secondary["dnt_tokens"])
     if dnt_p - dnt_s or dnt_s - dnt_p:
@@ -555,7 +573,11 @@ def assess_pair(primary: dict, secondary: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def determine_languages(audited: list[dict]) -> tuple[str, str, list[str]]:
-    """Returns (primary_lang, secondary_lang, all_detected_languages)."""
+    """Rank the languages detected across the document.
+
+    :param audited: audited segments.
+    :return: (primary language, secondary language, all detected languages by frequency); "??" stands for a missing language.
+    """
     langs = Counter(s["detected_lang"] for s in audited
                     if s["detected_lang"] != "??"
                     and s["pattern_type"] not in ("dnt", "numeric_only"))
@@ -574,23 +596,30 @@ def determine_languages(audited: list[dict]) -> tuple[str, str, list[str]]:
 def generate_questions(audited: list[dict], primary_lang: str,
                        secondary_lang: str, source_file: str,
                        mode: str = "bilingual") -> list[dict]:
-    """Rule-generated clarifying questions (no LLM). The old
-    'which_side_to_replace' question is gone — the user already picks
-    source/target in the UI before upload, so asking again was pure noise.
-    'unknown_lang' questions are only raised in bilingual mode, where a
-    segment's label decides translate-vs-keep; in monolingual mode every
-    ambiguous segment is translated anyway, so there is nothing to ask.
+    """Generate clarifying questions with rules (no LLM).
 
-    Paired-segment conflicts (numeric/reference-code/length mismatches, see
-    assess_pair) are NOT asked here — there is nothing to actually answer for
-    them (no real "conflict" question ever needs a free-text reply), so
-    presenting them as blocking questions just confused reviewers into
-    thinking something was required before continuing. They stay visible as
-    flags in the Segments panel for review instead."""
+    Only bilingual documents get questions, about low-confidence language detections. Pair conflicts are not questions; they stay visible as flags.
+
+    :param audited: audited segments.
+    :param primary_lang: primary language code, used in the question text.
+    :param secondary_lang: secondary language code, used in the question text.
+    :param source_file: source file name.
+    :param mode: "bilingual" or "monolingual"; monolingual yields no questions.
+    :return: question dicts, at most five.
+    """
     questions = []
     qid = 1
 
-    def add(category, question_text, seg_ids=None, context="", suggested=None):
+    def add(category: str, question_text: str, seg_ids: list[str] | None = None,
+            context: str = "", suggested: str | None = None) -> None:
+        """Append one question to the enclosing list.
+
+        :param category: question category.
+        :param question_text: text shown to the user.
+        :param seg_ids: segment ids the question concerns; None means none.
+        :param context: text excerpt shown with the question.
+        :param suggested: suggested answer; None means no suggestion.
+        """
         nonlocal qid
         questions.append({
             "q_id": f"q_{qid:03d}",
@@ -602,15 +631,11 @@ def generate_questions(audited: list[dict], primary_lang: str,
         })
         qid += 1
 
-    # Monolingual documents translate every segment source->target: there is
-    # no side-to-keep and cross-paragraph "pairs" are spurious, so there is
-    # nothing to clarify before translation. The reviewer checks the result in
-    # the Segments panel afterwards instead.
+    # Monolingual documents translate every segment, so there is nothing to clarify.
     if mode != "bilingual":
         return questions
 
-    # Genuinely ambiguous language detections (sample) — decides
-    # translate-vs-keep in bilingual mode, so worth asking.
+    # Ambiguous detections decide translate-vs-keep in bilingual mode.
     low_conf = [s for s in audited
                 if s["pattern_type"] == "mono"
                 and s["lang_confidence"] < 0.55
@@ -630,11 +655,20 @@ def generate_questions(audited: list[dict], primary_lang: str,
 # ---------------------------------------------------------------------------
 
 def strip_internal(seg: dict) -> dict:
-    """Remove the internal _-prefixed fields from an audited segment."""
+    """Remove the private underscore-prefixed fields of an audited segment.
+
+    :param seg: audited segment dict.
+    :return: a copy without underscore-prefixed keys.
+    """
     return {k: v for k, v in seg.items() if not k.startswith("_")}
 
 
 def main(extract_path: str, _job_dir: Path | None = None) -> None:
+    """Audit an extract file and write the audit and questions JSON next to it.
+
+    :param extract_path: path of the extract JSON.
+    :param _job_dir: job directory whose manifest status is set to "audited"; None skips the manifest update.
+    """
     src = Path(extract_path)
     extract = json.loads(src.read_text(encoding="utf-8"))
 
@@ -699,14 +733,14 @@ def main(extract_path: str, _job_dir: Path | None = None) -> None:
 
     # Summary
     pattern_counts = Counter(s["pattern_type"] for s in audit_report["segments"])
-    print(f"Audited {len(audited)} segments -> {audit_out.name}")
-    print(f"  Languages detected: {all_langs}")
-    print(f"  Primary={primary_lang.upper()}  Secondary={secondary_lang.upper()}")
-    print(f"  Pair count: {audit_report['pair_count']}")
-    print(f"  Conflicts: {audit_report['conflict_count']}")
-    print(f"  Patterns: {dict(pattern_counts)}")
-    print(f"  DNT tokens (occurrences): {audit_report['dnt_token_count']}")
-    print(f"Generated {len(questions)} questions -> {questions_out.name}")
+    logger.info("Audited %d segments -> %s", len(audited), audit_out.name)
+    logger.info("Languages detected: %s", all_langs)
+    logger.info("Primary=%s Secondary=%s", primary_lang.upper(), secondary_lang.upper())
+    logger.info("Pair count: %s", audit_report["pair_count"])
+    logger.info("Conflicts: %s", audit_report["conflict_count"])
+    logger.info("Patterns: %s", dict(pattern_counts))
+    logger.info("DNT tokens (occurrences): %s", audit_report["dnt_token_count"])
+    logger.info("Generated %d questions -> %s", len(questions), questions_out.name)
 
     if _job_dir:
         from job_utils import update_manifest
@@ -714,6 +748,7 @@ def main(extract_path: str, _job_dir: Path | None = None) -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     from job_utils import parse_job_flag, JobPaths
     job_dir, remaining = parse_job_flag(sys.argv[1:])
     if job_dir:
@@ -721,6 +756,6 @@ if __name__ == "__main__":
         main(str(jp.extract_json), _job_dir=job_dir)
     else:
         if len(sys.argv) != 2:
-            print("Usage: python audit.py <extract.json>")
+            logger.error("Usage: python audit.py <extract.json>")
             sys.exit(1)
         main(sys.argv[1])

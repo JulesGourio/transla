@@ -17,9 +17,17 @@ targets:
           description: "Copy of every table of the latlang Lakebase database into uat_proj.latlang Delta tables"
           # Two overlapping runs would replace the same tables concurrently.
           max_concurrent_runs: 1
+          queue:
+            enabled: true
+          email_notifications:
+            on_failure:
+              - ${var.notification_email}
+          notification_settings:
+            no_alert_for_canceled_runs: true
           tags:
-            project: LatLang
+            activity-type: ${var.job_activity_tag}
             job-purpose: lakebase-copy
+            project-name: latlang
           permissions:
             - group_name: "Role-Project-LEAP-CoreAdmin"
               level: CAN_MANAGE

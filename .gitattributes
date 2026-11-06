@@ -1,0 +1,9 @@
+# Shell scripts must keep LF: a CRLF checkout on Windows breaks them on the Linux container
+*.sh text eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.ftz binary
+*.ttf binary
+*.zip binary
