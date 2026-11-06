@@ -29,6 +29,8 @@ transport; one that needs the database uses the fake below.
 | `test_llm_retries.py` | `call_llm_json`: rate limits and timeouts are retried, a persistent gateway error gives up with its status, a client error is not retried, an answer cut at `max_tokens` is not sent for repair |
 | `test_pages.py` | Page specification parsing and the segment-to-page mapping |
 | `test_docx_images.py` | Images are converted to PNG when needed and sent with their own type |
+| `test_deploy_config.py` | The bundle, `target_env.json`, `app.yaml` and the deploy script agree; every job follows the job format and points to an existing notebook; the rendered env file is LF; requirements are pinned |
+| `test_code_conventions.py` | No `print`, a Sphinx docstring and a return annotation on every function, every parameter documented, no `DBTITLE`, no commented-out code, no narrating comment, route modules under 600 lines |
 | `test_lakebase_copy.py` | The pure functions of the Lakebase copy notebook, loaded from the notebook cell itself |
 
 ## Rules

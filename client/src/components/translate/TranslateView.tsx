@@ -78,9 +78,7 @@ interface JobState {
 }
 
 const TERMINAL_STATUSES: JobStatus[] = ['done', 'done_with_warnings', 'failed'];
-// Mirrors server ACTIVE_PROCESSING_STATUSES (translate.py) — a worker is (or
-// should be) actively driving the job in these statuses, so /restart refuses
-// them server-side; hide the button rather than let the user hit that 409.
+// Same list as the server's ACTIVE_PROCESSING_STATUSES: /restart refuses a job in these statuses with a 409, so the button is hidden.
 const ACTIVE_PROCESSING_STATUSES: JobStatus[] = [
   'uploaded', 'extracting', 'auditing', 'translating',
   'fit_checking', 'rebuilding', 'validating',

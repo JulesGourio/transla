@@ -1,10 +1,27 @@
 """Router-level behaviour that needs a database, run against tests/fakedb.py."""
 
 import asyncio
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
-from server.routers import translate as T
+from server.routers.translate import glossary as R_glossary
+from server.routers.translate import jobs as R_jobs
+from server.routers.translate import preview as R_preview
+from server.routers.translate import segments as R_segments
+from server.routers.translate import share_feedback as R_share
+from server.services import storage as _storage
+from server.services.translation import job_files, jobs_db, pipeline_job, pipeline_rebuild, pipeline_translate, runtime
 from tests.fakedb import FakePool
+
+_POOL_MODULES = (jobs_db, pipeline_rebuild, R_jobs, R_preview, R_segments, R_share, R_glossary)
+
+
+def _with_pool(pool):
+    """Patch get_pool in every module that looks it up."""
+    stack = ExitStack()
+    for module in _POOL_MODULES:
+        stack.enter_context(patch.object(module, 'get_pool', return_value=pool))
+    return stack
 
 
 def _run(coro):
@@ -14,9 +31,9 @@ def _run(coro):
 def test_background_upload_does_not_wipe_the_error_of_a_failed_job():
     pool = FakePool()
     pool.add_job(id=1, status='failed', error_type='BadZipFile', error_msg='File is not a zip file')
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T._storage, 'upload', return_value=None):
-        _run(T._upload_input_to_volume(1, b'not a docx', 'a.docx'))
+    with _with_pool(pool), \
+            patch.object(_storage, 'upload', return_value=None):
+        _run(job_files.upload_input_to_volume(1, b'not a docx', 'a.docx'))
     job = pool.job()
     assert job['input_volume_path'].endswith('input_a.docx')
     assert (job['status'], job['error_type'], job['error_msg']) == ('failed', 'BadZipFile', 'File is not a zip file')
@@ -25,10 +42,10 @@ def test_background_upload_does_not_wipe_the_error_of_a_failed_job():
 def test_status_update_still_sets_and_clears_the_error():
     pool = FakePool()
     pool.add_job(id=1, status='uploaded')
-    with patch.object(T, 'get_pool', return_value=pool):
-        _run(T._update_job(1, status='failed', error_type='X', error_msg='boom'))
+    with _with_pool(pool):
+        _run(jobs_db.update_job(1, status='failed', error_type='X', error_msg='boom'))
         assert pool.job()['error_msg'] == 'boom'
-        _run(T._update_job(1, status='extracting'))
+        _run(jobs_db.update_job(1, status='extracting'))
     assert pool.job()['error_msg'] is None
 
 
@@ -56,12 +73,12 @@ def _seed_job(pool, docx_bytes, rows):
 
 def _run_rebuild(pool, docx_bytes):
     uploaded = {}
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, '_download_from_volume', AsyncMock(return_value=docx_bytes)), \
-            patch.object(T._storage, 'upload', side_effect=lambda path, data: uploaded.update({path: data})), \
-            patch.object(T._storage, 'job_root', return_value='/out'), \
-            patch.object(T, '_generate_preview_pdfs', AsyncMock(return_value=None)):
-        _run(T._run_rebuild_stage(1, 'bg'))
+    with _with_pool(pool), \
+            patch.object(pipeline_rebuild, 'download_from_volume', AsyncMock(return_value=docx_bytes)), \
+            patch.object(_storage, 'upload', side_effect=lambda path, data: uploaded.update({path: data})), \
+            patch.object(_storage, 'job_root', return_value='/out'), \
+            patch.object(pipeline_rebuild, 'generate_preview_pdfs', AsyncMock(return_value=None)):
+        _run(pipeline_rebuild.run_rebuild_stage(1, 'bg'))
     return uploaded
 
 
@@ -102,7 +119,7 @@ def test_translating_a_segment_that_failed_before_clears_the_failure_flag():
         async with pool.acquire() as conn:
             for sid in ('s1', 's2'):
                 row = dict(await conn.fetchrow('SELECT * FROM translation_segments WHERE seg_id = $1', sid))
-                await T._apply_resolved_segment(conn, row, plan, 'Bonjour', {}, 'bg')
+                await pipeline_translate.apply_resolved_segment(conn, row, plan, 'Bonjour', {}, 'bg')
 
     _run(go())
     failed_before = pool.segment('s1')
@@ -124,40 +141,40 @@ def _request(**headers):
 def test_preview_is_refused_for_a_job_whose_validation_failed():
     pool = FakePool()
     pool.add_job(id=1, user_id='u', status='failed', input_volume_path='/in.docx', output_volume_path='/out.docx')
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
-            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'broken')):
+    with _with_pool(pool), \
+            patch.object(R_preview, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(R_preview, 'download_from_volume', AsyncMock(return_value=b'broken')):
         for fmt in ('docx', 'pdf'):
-            resp = _run(T.get_translation_preview(1, _request(), format=fmt))
+            resp = _run(R_preview.get_translation_preview(1, _request(), format=fmt))
             assert resp.status_code == 409
-        assert _run(T.get_translation_preview_pdf(1, _request(), side='after')).status_code == 409
+        assert _run(R_preview.get_translation_preview_pdf(1, _request(), side='after')).status_code == 409
 
 
 def test_preview_is_served_once_the_job_is_done():
     pool = FakePool()
     pool.add_job(id=1, user_id='u', status='done', input_volume_path='/in.docx', output_volume_path='/out.docx')
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
-            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'docx-bytes')):
-        resp = _run(T.get_translation_preview(1, _request(), format='docx'))
+    with _with_pool(pool), \
+            patch.object(R_preview, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(R_preview, 'download_from_volume', AsyncMock(return_value=b'docx-bytes')):
+        resp = _run(R_preview.get_translation_preview(1, _request(), format='docx'))
     assert set(resp) == {'before_docx_base64', 'after_docx_base64'}
 
 
 def test_shared_view_does_not_ship_the_file_of_a_failed_job():
     pool = FakePool()
     pool.add_job(id=1, user_id='u', status='failed', share_token='tok', output_volume_path='/out.docx')
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, '_download_from_volume', AsyncMock(return_value=b'broken')):
-        shared = _run(T.get_shared_translation_job('tok'))
+    with _with_pool(pool), \
+            patch.object(R_share, 'download_from_volume', AsyncMock(return_value=b'broken')):
+        shared = _run(R_share.get_shared_translation_job('tok'))
     assert shared['output_docx_base64'] is None
 
 
 def test_pdf_responses_are_revalidated_not_cached_for_ten_minutes():
-    first = T._revalidating_response(b'%PDF-1', 'application/pdf', _request())
+    first = R_preview._revalidating_response(b'%PDF-1', 'application/pdf', _request())
     assert first.headers['cache-control'] == 'private, no-cache'
-    again = T._revalidating_response(b'%PDF-1', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
+    again = R_preview._revalidating_response(b'%PDF-1', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
     assert again.status_code == 304
-    rebuilt = T._revalidating_response(b'%PDF-2', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
+    rebuilt = R_preview._revalidating_response(b'%PDF-2', 'application/pdf', _request(**{'if-none-match': first.headers['etag']}))
     assert rebuilt.status_code == 200 and rebuilt.body == b'%PDF-2'
 
 
@@ -166,7 +183,7 @@ def test_rebuild_deletes_the_previous_builds_preview_pdfs_first():
     pool = FakePool()
     _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0)])
     deleted = []
-    with patch.object(T._storage, 'delete', side_effect=deleted.append):
+    with patch.object(_storage, 'delete', side_effect=deleted.append):
         _run_rebuild(pool, docx)
     assert deleted == ['/out/1/preview_original.pdf', '/out/1/preview_translated.pdf']
 
@@ -180,13 +197,13 @@ def _retranslate(pool, seg_id, reply):
         sent.extend(strings)
         return {strings[0]: reply}
 
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
-            patch.object(T, '_get_llm_credentials', return_value=('h', 't')), \
-            patch.object(T, '_get_glossary_rows', AsyncMock(return_value=[])), \
+    with _with_pool(pool), \
+            patch.object(R_segments, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+            patch.object(R_segments, 'get_llm_credentials', return_value=('h', 't')), \
+            patch.object(R_segments, 'get_glossary_rows', AsyncMock(return_value=[])), \
             patch.dict('os.environ', {'TRANSLATE_ENDPOINT': 'ep'}), \
-            patch.object(T, '_translate_batch', side_effect=fake_batch):
-        resp = _run(T.retranslate_segment(1, seg_id, _request()))
+            patch.object(R_segments, 'translate_batch', side_effect=fake_batch):
+        resp = _run(R_segments.retranslate_segment(1, seg_id, _request()))
     return resp, sent
 
 
@@ -234,13 +251,13 @@ def _upload(name):
 
 
 def test_a_real_docx_passes_validation():
-    T._validate_file(_upload('a.docx'), build_docx(para('x')))
+    R_jobs._validate_file(_upload('a.docx'), build_docx(para('x')))
 
 
 @pytest.mark.parametrize('data', [b'D0CF11E0 old binary .doc', b'PK\x03\x04 truncated'])
 def test_a_file_that_is_not_a_zip_is_refused_on_the_spot(data):
     with pytest.raises(ValueError, match='not a valid .docx'):
-        T._validate_file(_upload('a.docx'), data)
+        R_jobs._validate_file(_upload('a.docx'), data)
 
 
 def test_a_zip_without_a_word_document_is_refused():
@@ -248,24 +265,24 @@ def test_a_zip_without_a_word_document_is_refused():
     with zipfile.ZipFile(buf, 'w') as z:
         z.writestr('notes.txt', 'hello')
     with pytest.raises(ValueError, match='not a Word document'):
-        T._validate_file(_upload('a.docx'), buf.getvalue())
+        R_jobs._validate_file(_upload('a.docx'), buf.getvalue())
 
 
 def test_a_zip_bomb_is_refused_before_anything_reads_it():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('word/document.xml', b'0' * (5 * 1024 * 1024))
-    with patch.object(T, 'MAX_UNZIPPED_BYTES', 1024 * 1024):
+    with patch.object(R_jobs, 'MAX_UNZIPPED_BYTES', 1024 * 1024):
         with pytest.raises(ValueError, match='too large once unzipped'):
-            T._validate_file(_upload('a.docx'), buf.getvalue())
+            R_jobs._validate_file(_upload('a.docx'), buf.getvalue())
 
 
 # --- manual edits ---
 
 def _edit(pool, seg_id, text):
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})):
-        return _run(T.update_segment_translation(1, seg_id, T.SegmentTranslationIn(translated_text=text), _request()))
+    with _with_pool(pool), \
+            patch.object(R_segments, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})):
+        return _run(R_segments.update_segment_translation(1, seg_id, R_segments.SegmentTranslationIn(translated_text=text), _request()))
 
 
 def test_a_blank_translation_is_refused_instead_of_emptying_the_paragraph():
@@ -298,10 +315,10 @@ def test_an_edit_on_a_finished_job_is_stored():
 
 def _approve(pool, candidate_id=1):
     ids = iter(['T0001', 'T0002'])
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u', 'email': 'a@b.c'})), \
-            patch.object(T, 'generate_term_id', new=lambda conn: _term_id(ids)):
-        return _run(T.approve_glossary_candidate(candidate_id, T.GlossaryCandidateApprove(), _request()))
+    with _with_pool(pool), \
+            patch.object(R_glossary, 'get_user_identity', AsyncMock(return_value={'user_id': 'u', 'email': 'a@b.c'})), \
+            patch.object(R_glossary, 'generate_term_id', new=lambda conn: _term_id(ids)):
+        return _run(R_glossary.approve_glossary_candidate(candidate_id, R_glossary.GlossaryCandidateApprove(), _request()))
 
 
 async def _term_id(ids):
@@ -340,18 +357,18 @@ def test_a_match_everything_rule_is_what_the_matcher_would_have_obeyed():
 
 def test_the_endpoint_answers_422_for_a_dangerous_rule():
     pool = FakePool()
-    with patch.object(T, 'get_pool', return_value=pool):
-        resp = _run(T.add_dnt_rule(T.DntRuleIn(pattern='*', match_mode='prefix')))
+    with _with_pool(pool):
+        resp = _run(R_glossary.add_dnt_rule(R_glossary.DntRuleIn(pattern='*', match_mode='prefix')))
     assert resp.status_code == 422
 
 
 # --- the first stage (extract + audit) and the stored original ---
 
 def _run_first_stage(pool, docx, upload_side_effect=None):
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T._storage, 'upload', side_effect=upload_side_effect), \
-            patch.object(T._storage, 'job_root', return_value='/out'):
-        _run(T._run_job(1, docx, 'a.docx', 'bg', 'fr'))
+    with _with_pool(pool), \
+            patch.object(_storage, 'upload', side_effect=upload_side_effect), \
+            patch.object(_storage, 'job_root', return_value='/out'):
+        _run(pipeline_job.run_job(1, docx, 'a.docx', 'bg', 'fr'))
 
 
 def test_a_job_whose_original_could_not_be_stored_fails_before_any_translation_is_paid_for():
@@ -384,7 +401,7 @@ def test_a_corrupt_file_keeps_its_error_message_even_though_the_upload_finishes_
 
 
 def test_long_file_names_are_shortened_but_keep_their_extension():
-    name = T._sanitize_filename('A' * 300 + '.docx')
+    name = job_files.sanitize_filename('A' * 300 + '.docx')
     assert len(name) <= 100 and name.endswith('.docx')
 
 
@@ -395,12 +412,12 @@ def test_spawned_tasks_are_kept_alive_until_they_finish():
         async def work():
             await done.wait()
 
-        task = T._spawn(work())
-        assert task in T._background_tasks
+        task = runtime.spawn(work())
+        assert task in runtime.background_tasks
         done.set()
         await task
         await asyncio.sleep(0)
-        assert task not in T._background_tasks
+        assert task not in runtime.background_tasks
 
     _run(go())
 
@@ -414,7 +431,7 @@ def _apply(pool, seg_id, source, translated, dnt_tokens='[]'):
         async with pool.acquire() as conn:
             row = dict(await conn.fetchrow('SELECT * FROM translation_segments WHERE seg_id = $1', seg_id))
             row['dnt_tokens'] = dnt_tokens
-            await T._apply_resolved_segment(conn, row, plan, translated, {}, 'bg')
+            await pipeline_translate.apply_resolved_segment(conn, row, plan, translated, {}, 'bg')
 
     _run(go())
     return pool.segment(seg_id)
@@ -487,11 +504,11 @@ def test_job_list_paging_arguments_are_clamped():
         seen.append(args)
         return await real(self, sql, *args)
 
-    with patch.object(T, 'get_pool', return_value=pool), \
-            patch.object(T, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
+    with _with_pool(pool), \
+            patch.object(R_jobs, 'get_user_identity', AsyncMock(return_value={'user_id': 'u'})), \
             patch.object(fakedb.FakeConn, 'fetch', spy):
-        _run(T.list_translation_jobs(_request(), limit=-5, offset=-3))
-        _run(T.list_translation_jobs(_request(), limit=10**6, offset=0))
+        _run(R_jobs.list_translation_jobs(_request(), limit=-5, offset=-3))
+        _run(R_jobs.list_translation_jobs(_request(), limit=10**6, offset=0))
     assert seen[0][1:] == (1, 0) and seen[1][1:] == (200, 0)
 
 
@@ -502,8 +519,8 @@ def test_heartbeat_keeps_a_running_stage_alive_and_stops_when_cancelled():
     pool.add_job(id=1, status='translating', worker_heartbeat='2000-01-01')
 
     async def go():
-        with patch.object(T, 'get_pool', return_value=pool), patch.object(T, '_HEARTBEAT_S', 0.01):
-            task = T._spawn(T._heartbeat_loop(1))
+        with _with_pool(pool), patch.object(jobs_db, 'HEARTBEAT_S', 0.01):
+            task = runtime.spawn(jobs_db.heartbeat_loop(1))
             await asyncio.sleep(0.1)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -516,6 +533,6 @@ def test_stages_cancel_their_heartbeat_when_they_end():
     docx = build_docx(para('Premier'))
     pool = FakePool()
     _seed_job(pool, docx, [dict(translated_text='First', keep_as_is=0)])
-    before = len(T._background_tasks)
+    before = len(runtime.background_tasks)
     _run_rebuild(pool, docx)
-    assert len(T._background_tasks) == before
+    assert len(runtime.background_tasks) == before

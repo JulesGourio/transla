@@ -1,9 +1,9 @@
 """Tests for the Translate pipeline server logic.
 
 Coverage:
-  - _parse_lang_answer (deterministic answer application)
-  - _build_glossary_context batch filtering
-  - _translate_batch id-keyed request/response mapping (mocked LLM)
+  - parse_lang_answer (deterministic answer application)
+  - build_glossary_context batch filtering
+  - translate_batch id-keyed request/response mapping (mocked LLM)
   - check_fit / adapt_lengths None guards (keep-as-is segments carry no translation)
   - soffice exact-PDF engine: discovery failure modes + content-hash cache
   - bilingual inline pre-split (charspan boundary finder, per-segment
@@ -25,12 +25,8 @@ import zipfile
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
-from server.routers.translate import (
-    _build_glossary_context,
-    _parse_lang_answer,
-    _plan_segment_translation,
-    _translate_batch,
-)
+from server.services.translation.segment_plan import parse_lang_answer, plan_segment_translation
+from server.services.translation.translate_batches import build_glossary_context, translate_batch
 from server.services import soffice
 from server.services.processors.translation import adapt_lengths, audit_segments, check_fit, extract_docx_segments
 from server.services.translation import audit as _audit
@@ -137,7 +133,7 @@ def test_inline_charsplit_runs_and_translates_source_side_regardless_of_mode():
     row = {'pattern_type': s2['pattern_type'], 'source_text': s2['text'],
            'detected_lang': s2['detected_lang'], 'lang_confidence': s2['lang_confidence'],
            'inline_split': s2['inline_split']}
-    plan = _plan_segment_translation(row, 'bg', 'fr', report['mode'])
+    plan = plan_segment_translation(row, 'bg', 'fr', report['mode'])
     assert plan is not None
     assert plan['query'].startswith('Поставете')           # BG span sent to LLM
     composed = plan['compose']('[FR]')
@@ -150,17 +146,17 @@ def test_inline_charsplit_runs_and_translates_source_side_regardless_of_mode():
 # ---------------------------------------------------------------------------
 
 def test_parse_lang_answer_variants():
-    assert _parse_lang_answer('CS') == 'cs'
-    assert _parse_lang_answer("c'est du tchèque") == 'cs'
-    assert _parse_lang_answer('This is Czech text') == 'cs'
-    assert _parse_lang_answer('bulgare') == 'bg'
-    assert _parse_lang_answer('français') == 'fr'
+    assert parse_lang_answer('CS') == 'cs'
+    assert parse_lang_answer("c'est du tchèque") == 'cs'
+    assert parse_lang_answer('This is Czech text') == 'cs'
+    assert parse_lang_answer('bulgare') == 'bg'
+    assert parse_lang_answer('français') == 'fr'
 
 
 def test_parse_lang_answer_ambiguous_or_absent():
-    assert _parse_lang_answer('cs or fr, not sure') is None
-    assert _parse_lang_answer('je ne sais pas') is None
-    assert _parse_lang_answer('') is None
+    assert parse_lang_answer('cs or fr, not sure') is None
+    assert parse_lang_answer('je ne sais pas') is None
+    assert parse_lang_answer('') is None
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +171,7 @@ _GLOSSARY = [
 
 
 def test_glossary_filtered_to_batch_terms():
-    ctx = _build_glossary_context(_GLOSSARY, 'cs', 'fr',
+    ctx = build_glossary_context(_GLOSSARY, 'cs', 'fr',
                                   batch_strings=['Utáhněte šroub M5', 'Zkontrolujte matice'])
     assert 'šroub -> vis' in ctx
     assert 'matice -> écrou' in ctx
@@ -183,7 +179,7 @@ def test_glossary_filtered_to_batch_terms():
 
 
 def test_glossary_full_without_batch():
-    ctx = _build_glossary_context(_GLOSSARY, 'cs', 'fr')
+    ctx = build_glossary_context(_GLOSSARY, 'cs', 'fr')
     assert ctx.count('->') == 3
 
 
@@ -195,8 +191,8 @@ def test_translate_batch_maps_ids_back_to_source_strings():
     strings = ['Utáhněte šroub', 'Zkontrolujte "matice"\nznovu', 'Hotovo']
     llm_response = {'translations': {'0': 'Serrez la vis', '1': 'Vérifiez les « écrous » à nouveau', '2': ''}}
     usage = {'input_tokens': 10, 'output_tokens': 5}
-    with patch('server.routers.translate.call_llm_json', new=AsyncMock(return_value=(llm_response, usage))) as mock:
-        out = asyncio.run(_translate_batch('h', 't', 'ep', strings, 'cs', 'fr', _GLOSSARY, 1))
+    with patch('server.services.translation.translate_batches.call_llm_json', new=AsyncMock(return_value=(llm_response, usage))) as mock:
+        out = asyncio.run(translate_batch('h', 't', 'ep', strings, 'cs', 'fr', _GLOSSARY, 1))
     # id-keyed: quotes/newlines in source strings can no longer break the mapping
     assert out[strings[0]] == 'Serrez la vis'
     assert out[strings[1]] == 'Vérifiez les « écrous » à nouveau'
@@ -207,8 +203,8 @@ def test_translate_batch_maps_ids_back_to_source_strings():
 
 def test_translate_batch_tolerates_malformed_llm_payload():
     usage = {'input_tokens': 1, 'output_tokens': 1}
-    with patch('server.routers.translate.call_llm_json', new=AsyncMock(return_value=(['not', 'a', 'dict'], usage))):
-        out = asyncio.run(_translate_batch('h', 't', 'ep', ['abc'], 'cs', 'fr', [], 1))
+    with patch('server.services.translation.translate_batches.call_llm_json', new=AsyncMock(return_value=(['not', 'a', 'dict'], usage))):
+        out = asyncio.run(translate_batch('h', 't', 'ep', ['abc'], 'cs', 'fr', [], 1))
     assert out == {}
 
 
@@ -561,7 +557,7 @@ def test_plan_charsplit_translates_source_side_only():
     off = _BG_EN.index('Adding')
     row = _row(_BG_EN, 'bilingual_inline_charsplit', 'en',
                {'kind': 'char', 'offset': off, 'left_lang': 'bg', 'right_lang': 'en'})
-    plan = _plan_segment_translation(row, 'bg', 'en', 'bilingual')
+    plan = plan_segment_translation(row, 'bg', 'en', 'bilingual')
     assert plan is not None
     assert plan['query'] == _BG_EN[:off].strip()          # BG span only
     full = plan['compose']('Ajout d’une photo et description')
@@ -574,7 +570,7 @@ def test_plan_slash_right_side_source():
     off = text.index('/')
     row = _row(text, 'bilingual_inline_slash', 'fr',
                {'kind': 'slash', 'offset': off, 'left_lang': 'fr', 'right_lang': 'cs'})
-    plan = _plan_segment_translation(row, 'cs', 'fr', 'bilingual')
+    plan = plan_segment_translation(row, 'cs', 'fr', 'bilingual')
     assert plan['query'] == 'Utáhněte šroub'
     assert plan['compose']('Serrez la vis') == 'Serrer la vis / Serrez la vis'
 
@@ -583,7 +579,7 @@ def test_plan_format_split_marks_span_translated():
     row = _row('Utáhněte šroub Tighten the screw', 'bilingual_inline_concat', 'en',
                {'kind': 'format', 'fmt_a': 'b', 'fmt_b': '', 'lang_a': 'cs',
                 'lang_b': 'en', 'text_a': 'Utáhněte šroub ', 'text_b': 'Tighten the screw'})
-    plan = _plan_segment_translation(row, 'cs', 'en', 'bilingual')
+    plan = plan_segment_translation(row, 'cs', 'en', 'bilingual')
     assert plan['query'] == 'Utáhněte šroub'
     assert plan['kept_text'] == 'Tighten the screw'
     import json as _json
@@ -594,14 +590,14 @@ def test_plan_format_split_marks_span_translated():
 def test_plan_inline_without_source_side_keeps_whole():
     row = _row('Serrer / Tighten', 'bilingual_inline_slash', 'fr',
                {'kind': 'slash', 'offset': 7, 'left_lang': 'fr', 'right_lang': 'en'})
-    assert _plan_segment_translation(row, 'bg', 'en', 'bilingual') is None
+    assert plan_segment_translation(row, 'bg', 'en', 'bilingual') is None
 
 
 def test_plan_mono_bilingual_source_vs_kept():
     # bilingual: translate the source-language side, keep the other.
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('Завършване', detected='bg'), 'bg', 'en', 'bilingual')['query'] == 'Завършване'
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('Door closing', detected='en'), 'bg', 'en', 'bilingual') is None
 
 
@@ -610,20 +606,20 @@ def test_plan_mono_monolingual_translates_unless_confident_target():
     # target-language passage.
     # A French cognate title fastText may confidently mislabel 'en' at <0.85
     # is still translated (no silent keep).
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('OPERATION 20 PERCAGE', detected='en', confidence=0.80),
         'fr', 'en', 'monolingual') is not None
     # An undetermined segment is translated.
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('RONDELLE', detected='??', confidence=0.0),
         'fr', 'en', 'monolingual') is not None
     # A genuine, confident, long English passage is kept verbatim.
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('This document is the property of LATECOERE and must not be shared.',
              detected='en', confidence=0.99),
         'fr', 'en', 'monolingual') is None
     # A short confident target label is NOT enough to keep (min word count).
-    assert _plan_segment_translation(
+    assert plan_segment_translation(
         _row('Level 1', detected='en', confidence=0.99),
         'fr', 'en', 'monolingual') is not None
 

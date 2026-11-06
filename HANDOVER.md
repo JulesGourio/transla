@@ -31,7 +31,7 @@ cours reprend là où elle s'était arrêtée.
 
 | Env | Cible du bundle | Workspace | Catalogue.schéma | Profil CLI | Service principal des jobs |
 |---|---|---|---|---|---|
-| DEV | `dev` | `dbc-c623749d-731b` | `dev_proj.latlang` | `DEV` | non défini (pas de job en DEV) |
+| DEV | `dev` | `dbc-c623749d-731b` | `dev_proj.latlang` | `DEV` | non défini : les jobs DEV tournent sous l'utilisateur qui les lance |
 | UAT | `latlang-uat` | `dbc-3a17bfce-9e88` | `uat_proj.latlang` | `UAT` | `3e5cd4e5-f765-4760-b974-ee7715258b39` (job-runner-sa-uat) |
 | PROD | `latlang-prod` | **non renseigné** dans `databricks.yml` | `prod_proj.latlang` | `qualibot-prod` | non défini |
 
@@ -92,10 +92,21 @@ $sp = (databricks apps get latlang --profile UAT -o json | ConvertFrom-Json).ser
 databricks bundle run grant_volume_access --target latlang-uat --profile UAT --params "service_principal=$sp"
 ```
 
+En DEV le même job existe (`--target dev --profile DEV`), sans service principal de job : il s'exécute sous votre compte,
+qui doit avoir `MANAGE` sur `dev_proj`.
+
 Utiliser bien `service_principal_client_id` (c'est aussi le champ `id` de `apps get`), et non l'identifiant
 `oauth2_app_client_id`, qui désigne une autre intégration.
 
 ### 3.5 Créer le rôle Postgres de l'application
+
+Le script `utils/deploy/ensure_app_access.ps1` le fait de façon idempotente (rien si le rôle existe) :
+
+```powershell
+.\utils\deploy\ensure_app_access.ps1 -AppEnv dev     # ou uat
+```
+
+Les commandes détaillées ci-dessous font la même chose à la main.
 
 Sans ce rôle, l'application échoue au démarrage avec `password authentication failed`. `createdb` doit être posé dès la
 création : `DATABRICKS_SUPERUSER` seul ne le donne pas, et l'application a besoin de créer sa base `latlang` au premier
@@ -173,7 +184,9 @@ databricks apps logs latlang --profile UAT | Select-String -Pattern "Traceback|E
 2. Envoyer un fichier `.doc` renommé en `.docx` : message immédiat « not a valid .docx », aucune tâche créée.
 3. Traduire, ouvrir l'aperçu, modifier un segment, cliquer « Rebuild » : l'aperçu montre la modification tout de suite.
 4. Filtre de pages : `5-3` répond « pages must look like… » ; `1-3` traduit aussi les en-têtes et pieds de page.
-5. Une tâche complète va jusqu'à `done` sans erreur dans `databricks apps logs latlang --profile UAT`.
+5. `<url de l'app>/api/health/ready` répond `ready` (Lakebase joignable, stockage des tâches inscriptible) ; `/api/health`
+   ne répond que « l'application tourne ».
+6. Une tâche complète va jusqu'à `done` sans erreur dans `databricks apps logs latlang --profile UAT`.
 
 Règles DNT déjà en base : le contrôle (règle qui correspond à tout ou à rien) s'applique à l'ajout seulement. Pour repérer
 une règle ancienne dangereuse, dans l'éditeur SQL de la base `latlang` (hôte donné par
@@ -220,8 +233,9 @@ Description des notebooks : [utils/databricks_ops](utils/databricks_ops/README.m
 
 ### Ajouter une langue
 
-Toucher dans l'ordre : `langdetect.py` (profil, `SUPPORTED_LANGS`), `routers/translate.py` (noms de langues, alias de
-réponses, modèles Pydantic du glossaire, requêtes SQL), `glossary_verify.py` (noms), `lakebase.py` (colonnes du glossaire,
+Toucher dans l'ordre : `langdetect.py` (profil, `SUPPORTED_LANGS`), `translate_batches.py` (noms de langues),
+`segment_plan.py` (alias de réponses), `jobs_db.py` et `glossary_proposals.py` (requêtes SQL), `routers/translate/glossary.py`
+(modèles Pydantic du glossaire, requêtes SQL), `glossary_verify.py` (noms), `lakebase.py` (colonnes du glossaire,
 avec `ALTER TABLE … ADD COLUMN IF NOT EXISTS`), puis le client (`TranslateView.tsx`, `SegmentsPanel.tsx`, `GlossaryPanel.tsx`,
 `Flag.tsx`). Ajouter des tests dans `tests/test_translate.py`.
 

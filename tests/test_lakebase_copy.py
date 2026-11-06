@@ -12,7 +12,7 @@ NOTEBOOK = Path(__file__).parent.parent / 'utils/databricks_ops/lakebase_sync/co
 
 def _load_pure_cell() -> dict:
     cells = NOTEBOOK.read_text(encoding='utf-8').split('# COMMAND ----------')
-    cell = next(c for c in cells if 'DBTITLE 1,Pure functions' in c)
+    cell = next(c for c in cells if 'def parse_list(' in c)
     namespace: dict = {}
     exec(cell, namespace)
     return namespace

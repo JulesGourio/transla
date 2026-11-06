@@ -1,5 +1,4 @@
 # Databricks notebook source
-# DBTITLE 1,Header
 # MAGIC %md
 # MAGIC # Lakebase → Unity Catalog table copy
 # MAGIC
@@ -45,7 +44,6 @@
 
 # COMMAND ----------
 
-# DBTITLE 1,Setup — installs only missing packages, without altering the runtime's own packages
 """Notebook that copies every table of a Lakebase database into Delta tables of a Unity Catalog schema."""
 import importlib.metadata as md
 import logging
@@ -98,7 +96,6 @@ logger.info("%s", {pkg: _installed(names) for pkg, (_, names) in NEEDED.items()}
 
 # COMMAND ----------
 
-# DBTITLE 1,Parameters
 dbutils.widgets.text("lakebase_project", "qualibot", "Lakebase project id (Autoscaling)")
 dbutils.widgets.text("lakebase_branch", "production", "Lakebase branch")
 dbutils.widgets.text("lakebase_endpoint", "", "Lakebase endpoint (empty = first)")
@@ -121,7 +118,6 @@ PARAMS = {name: dbutils.widgets.get(name).strip() for name in [
 
 # COMMAND ----------
 
-# DBTITLE 1,Pure functions (no Spark / Databricks dependency)
 import datetime
 import decimal
 import json
@@ -267,7 +263,6 @@ def resolve_target_names(tables: list, pattern: str) -> dict:
 
 # COMMAND ----------
 
-# DBTITLE 1,Configuration checks
 TARGET_CATALOG, TARGET_SCHEMA = PARAMS["target_catalog"], PARAMS["target_schema"]
 if not TARGET_CATALOG or not TARGET_SCHEMA:
     raise ValueError("target_catalog and target_schema are required.")
@@ -284,7 +279,6 @@ TARGET_PREFIX = f"{quote_ident(TARGET_CATALOG)}.{quote_ident(TARGET_SCHEMA)}"
 
 # COMMAND ----------
 
-# DBTITLE 1,Connection to Lakebase (identity of the notebook / job, short-lived OAuth token)
 import uuid
 
 import psycopg2
@@ -330,7 +324,6 @@ logger.info("Connected to %s / database %s as %s", source_label, PARAMS["lakebas
 
 # COMMAND ----------
 
-# DBTITLE 1,Discovery of the source tables and their columns
 with conn.cursor() as cur:
     # Ordinary and partitioned tables; partitions themselves are excluded (their rows are read through the parent).
     cur.execute("""
@@ -375,7 +368,6 @@ if skipped:
 
 # COMMAND ----------
 
-# DBTITLE 1,Copy
 import time
 from functools import reduce
 
@@ -459,7 +451,6 @@ finally:
 
 # COMMAND ----------
 
-# DBTITLE 1,Summary
 summary = spark.createDataFrame(
     results, "source STRING, target STRING, status STRING, row_count BIGINT, seconds DOUBLE, error STRING")
 display(summary)

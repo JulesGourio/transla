@@ -13,8 +13,29 @@ Parent: [server](../README.md). Callers: [routers](../routers/README.md).
 | `soffice.py` | LibreOffice discovery and the `.docx` to PDF conversion |
 | `storage.py` | Reading and writing job files, in a volume or on local disk |
 | `user.py` | Who is calling, from the request headers |
-| [`translation/`](translation/README.md) | The translation engine: extraction, language detection, audit, fit check, rebuild, validation, images, pages, glossary helpers |
+| [`translation/`](translation/README.md) | The translation engine: extraction, language detection, audit, fit check, rebuild, validation, images, pages, glossary helpers, and the background pipeline of a job (table below) |
 | [`processors/`](processors/README.md) | The in-memory adapter between the router and the engine |
+
+### Pipeline modules of `translation/`
+
+The background stages of a job and the helpers they share. The routes in [routers](../routers/README.md) start them
+with `spawn`; they write their progress to the job row.
+
+| Module | Content |
+|---|---|
+| `translation/runtime.py` | `spawn` (keeps a reference to a background task), the cap on jobs processed at once, the service-principal credentials of a detached task |
+| `translation/jobs_db.py` | Job, segment and question rows, the worker heartbeat, the LLM usage rows, and `ACTIVE_PROCESSING_STATUSES` |
+| `translation/job_files.py` | The stored original, the pregenerated preview PDFs and the file-name sanitizing |
+| `translation/translate_batches.py` | Prompts, glossary and memory context, batching, retries and concurrency caps of the LLM translation |
+| `translation/segment_plan.py` | What each segment sends to the LLM or keeps, the answer-language parser and the reviewer-facing category |
+| `translation/pipeline_job.py` | First stages: extraction, image OCR, audit, page filter, persistence |
+| `translation/pipeline_translate.py` | Translation stage: reviewer answers, planning, incremental persistence, consistency flags |
+| `translation/pipeline_rebuild.py` | Rebuild stage: fit check, rebuild, validation with one automatic re-translation, flags, output storage |
+| `translation/glossary_proposals.py` | Glossary candidates proposed from a validated job |
+
+Every stage holds one slot of the process-wide cap (`TRANSLATE_MAX_CONCURRENT_JOBS`) while it runs and refreshes the job
+heartbeat every 30 seconds. The translation stage writes each batch as soon as it is resolved, so an interrupted run
+resumes with the segments still missing.
 
 ### lakebase.py
 
@@ -70,7 +91,8 @@ every request.
 
 - `translation/` imports `llm.py` (glossary extraction), `soffice.py` (page mapping) and nothing from the routers.
 - `processors/translation.py` imports `translation/`.
-- Only `routers/translate.py` and `app.py` import `lakebase.py`.
+- Only `routers/translate/`, the pipeline modules of `translation/` and `app.py` import `lakebase.py`.
+- The pipeline modules of `translation/` call `processors/translation.py`, which does not import them back.
 
 ## Rules
 

@@ -1,7 +1,8 @@
 # Translation pipeline
 
 How a `.docx` goes from upload to a translated, validated document. The code is in
-[routers/translate.py](../server/routers/translate.py) (the orchestration) and in the
+[routers/translate/](../server/routers/translate/__init__.py) (the routes), the
+[pipeline modules](../server/services/README.md#pipeline-modules-of-translation) (the orchestration) and the
 [translation engine](../server/services/translation/README.md) (the document work).
 
 Parent: [docs](README.md).

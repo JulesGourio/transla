@@ -1,8 +1,10 @@
 # translation
 
-The translation engine: everything that reads a `.docx`, decides what to translate, writes the translation back, and
-checks the result. The modules work on bytes and dictionaries and never touch the database; the
-[router](../../routers/README.md) drives them through the [processors](../processors/README.md) adapter.
+The translation engine and the job pipeline. The engine modules read a `.docx`, decide what to translate, write the
+translation back and check the result; they work on bytes and dictionaries and never touch the database. The pipeline
+modules (`pipeline_*`, `jobs_db`, `translate_batches`, ...) run a job stage by stage on top of them and own the database
+access. The [routers](../../routers/README.md) start the stages; the [processors](../processors/README.md) adapter
+connects the engine to uploaded bytes.
 
 Parent: [services](../README.md). Pipeline walk-through: [docs/pipeline.md](../../../docs/pipeline.md).
 
@@ -23,6 +25,9 @@ Parent: [services](../README.md). Pipeline walk-through: [docs/pipeline.md](../.
 | `validate.py` | The structural checks and the residual-language check (the per-file checks; the bytes versions are in the processors) |
 | `comments.py` | Injects Word comments into a `.docx` |
 | `review_comments.py` | Turns a job's flags into the comment specifications `comments.py` injects |
+| `pipeline_job.py`, `pipeline_translate.py`, `pipeline_rebuild.py` | The three background stages: extraction and audit, translation, rebuild and validation |
+| `jobs_db.py`, `job_files.py`, `runtime.py` | Job rows and heartbeat, volume and preview-PDF files, background-task bookkeeping |
+| `translate_batches.py`, `segment_plan.py`, `glossary_proposals.py` | Prompts and batching, per-segment planning and categories, glossary candidate proposals |
 | `docx_images.py` | Lists, groups and transcribes the images of a `.docx`, and orders the resulting segments |
 | `pages.py` | Page specification parsing and the segment-to-page mapping |
 | `pdf_diff.py` | Pixel difference between two PDFs (PyMuPDF and Pillow) |
@@ -132,7 +137,7 @@ merges with comments already in the document. A specification whose segment is u
   paragraphs and `segment_fidelity` compares ids.
 - The stable parts of a document (styles, settings, theme, media, ...) are never rewritten.
 - Supported languages are `en fr es de cs bg pt ar`. Adding one touches `langdetect.LANG_PROFILES`, `SUPPORTED_LANGS`, the
-  language name tables of the translate router and `glossary_verify.py`, the glossary columns, and the client's language
+  language name tables of `translate_batches.py` and `glossary_verify.py`, the glossary columns, and the client's language
   lists.
 
 ## See also

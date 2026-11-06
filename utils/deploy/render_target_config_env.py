@@ -10,13 +10,20 @@ accidentally deploying to uat with latlang_test still set).
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name("target_env.json")
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """Writes the environment file of the target named on the command line.
+
+    :return: None
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) < 2:
         raise SystemExit(f"Usage: {sys.argv[0]} <dev|uat|prod> [output_path]")
     target = sys.argv[1]
@@ -34,7 +41,7 @@ def main() -> None:
     # bash bakes into the exported values (e.g. LAKEBASE_DATABASE becomes
     # "latlang_test\r"), breaking the Postgres database name.
     output_path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8", newline="\n")
-    print(f"Wrote {len(lines)} var(s) to {output_path} for target '{target}'.")
+    logger.info("Wrote %d var(s) to %s for target '%s'.", len(lines), output_path, target)
 
 
 if __name__ == "__main__":

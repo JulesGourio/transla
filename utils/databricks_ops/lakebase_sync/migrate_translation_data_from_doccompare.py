@@ -1,5 +1,4 @@
 # Databricks notebook source
-# DBTITLE 1,One-time data migration — doccompare -> latlang(_test)
 """Copies historical Translate/glossary tables out of an existing sibling
 app's Lakebase database (doccompare) into this app's own database
 (latlang_test by default, never latlang directly).

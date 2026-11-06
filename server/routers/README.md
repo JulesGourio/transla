@@ -8,11 +8,26 @@ Parent: [server](../README.md).
 
 | Module | Content |
 |---|---|
-| `translate.py` | The translation feature: jobs, segments, previews, sharing, feedback, glossary. Also the orchestration of the pipeline stages (see [docs/pipeline.md](../../docs/pipeline.md)) |
+| `translate/` | The translation feature, one module per domain (table below). `translate/__init__.py` merges them into one `router` and exposes `ACTIVE_PROCESSING_STATUSES` |
 | `config.py` | `GET /config/app` (name, logo) and `GET /me` (user, workspace URL) |
 | `health.py` | `GET /health`: `{"status": "healthy", "timestamp": ...}` |
 
-## Routes of `translate.py`
+## Modules of `translate/`
+
+| Module | Routes |
+|---|---|
+| `translate/jobs.py` | Upload, status, image listing, restart, notes, sign-off, history; the upload checks |
+| `translate/stages.py` | Start of the translation and of the rebuild |
+| `translate/questions.py` | The answers to the audit questions |
+| `translate/segments.py` | Segment listing, retranslation, language override, warning dismissal, manual edit |
+| `translate/preview.py` | Before/after documents, PDFs, page diff, render-engine status |
+| `translate/share_feedback.py` | Feedback and the read-only shared view |
+| `translate/glossary.py` | Glossary terms, do-not-translate rules, candidate review |
+
+The routes only validate, read and write rows, and start a stage; the stages themselves are in the
+[pipeline modules](../services/README.md#pipeline-modules-of-translation) of the services.
+
+## Routes of `translate/`
 
 Every route depends on `require_translate`, which allows everyone: access is decided by the permissions of the Databricks
 App. A job route answers `404` for a job that belongs to another user.
@@ -81,7 +96,7 @@ A segment's category is derived from its state: `image_translation`, `kept_page_
 ## Rules
 
 - Every query filters on the caller's `user_id`, except the shared view, the glossary and the feedback insert.
-- A stage is started with `_spawn`, which keeps a reference to the task so it is not garbage-collected.
+- A stage is started with `spawn` (`services/translation/runtime.py`), which keeps a reference to the task so it is not garbage-collected.
 - Edits (segment text, language, retranslate) and restart are refused while the job is active (409): the running stage
   would overwrite them.
 - A segment edit never changes `output.docx`. The next rebuild does.
