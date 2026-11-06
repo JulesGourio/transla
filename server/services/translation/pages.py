@@ -1,14 +1,11 @@
 """Best-effort .docx segment -> rendered page number mapping.
 
-.docx has no native page concept in its XML — page breaks are computed at
-layout time (margins, font metrics, manual breaks). To let a job restrict
-translation to a page range, we reuse the LibreOffice PDF conversion
-already used for previews (soffice.py) and walk its per-page text in
-document order, matching each segment's text as we go. This mirrors what a
-reviewer would actually see if they opened the doc in Word/a PDF viewer,
-but is approximate: it assumes segments appear on the page in the same
-order LibreOffice renders them, which can drift on complex table/text-box
-layouts.
+A .docx has no page concept in its XML; page breaks are computed at layout
+time. A job restricts translation to a page range by rendering the document to
+PDF with LibreOffice (soffice.py) and matching each segment's text against the
+per-page text in document order. The mapping is approximate: it assumes
+LibreOffice renders segments in document order, which can drift on complex
+table and text-box layouts.
 """
 
 import logging
@@ -18,12 +15,11 @@ from ..soffice import SofficeConversionError, SofficeUnavailable, convert_docx_t
 
 logger = logging.getLogger(__name__)
 
-_MAX_PAGE = 5000  # beyond any real document; "1-999999999999" used to build a set of that size
+_MAX_PAGE = 5000  # beyond any real document; bounds the size of the page set
 
-# Their text is not laid out in reading order with the body: a header repeats
-# on every page, a footnote sits at the bottom of the page that cites it. The
-# forward-only cursor below mapped them all to the last body page, so a filter
-# like "1-3" left every header and footnote in the source language.
+# Their text is not in reading order with the body (a header repeats on every
+# page, a footnote sits at the bottom of the citing page), so the forward-only
+# cursor cannot place them.
 _UNPLACEABLE_PARTS = ('header', 'footer', 'footnotes', 'endnotes', 'comments')
 
 _PROBE_LEN = 80  # short prefix is enough to locate a segment and more
@@ -31,8 +27,12 @@ _PROBE_LEN = 80  # short prefix is enough to locate a segment and more
 
 
 def parse_page_spec(spec: str) -> set[int] | None:
-    """Parse "3-10", "1,4,9", or "1-3,7,12-15" into a set of 1-indexed page
-    numbers. Returns None for a blank spec (= no filter, translate everything)."""
+    """Parse a page-range specification such as "3-10", "1,4,9" or "1-3,7,12-15".
+
+    :param spec: the specification; blank or None means no filter.
+    :return: set of 1-indexed page numbers, or None when there is no filter.
+    :raises ValueError: on a non-numeric token, a reversed range, or a page below 1 or above the maximum.
+    """
     spec = (spec or '').strip()
     if not spec:
         return None
@@ -43,8 +43,7 @@ def parse_page_spec(spec: str) -> set[int] | None:
             continue
         lo, sep, hi = token.partition('-')
         first, last = int(lo), int(hi) if sep else int(lo)
-        # A reversed range ("5-3") used to come out empty and silently turn the
-        # filter off, translating (and paying for) the whole document.
+        # A reversed range must raise: an empty set would silently turn the filter off.
         if first < 1 or last < first or last > _MAX_PAGE:
             raise ValueError(f'invalid page range {token!r}')
         pages.update(range(first, last + 1))
@@ -52,10 +51,14 @@ def parse_page_spec(spec: str) -> set[int] | None:
 
 
 def assign_pages(segments: list[dict], docx_bytes: bytes) -> dict[str, int]:
-    """Return {seg_id: 1-indexed page number} best-effort, via the doc's own
-    LibreOffice-rendered PDF. A segment missing from the result could not be
-    confidently placed — callers should treat that as "in range" rather than
-    silently excluding content a mapping failure merely couldn't locate."""
+    """Map segments to rendered page numbers using the document's own LibreOffice PDF rendering.
+
+    A segment missing from the result could not be placed confidently; callers treat it as in range rather than excluding content a mapping failure could not locate.
+
+    :param segments: extracted segment dicts in document order, with "seg_id", "text" and "part".
+    :param docx_bytes: the .docx file bytes.
+    :return: seg_id to 1-indexed page number; empty when the conversion is unavailable.
+    """
     try:
         pdf_bytes = convert_docx_to_pdf(docx_bytes)
     except (SofficeUnavailable, SofficeConversionError) as e:
@@ -64,8 +67,7 @@ def assign_pages(segments: list[dict], docx_bytes: bytes) -> dict[str, int]:
 
     fitz = _import_fitz()
     with fitz.open(stream=pdf_bytes, filetype='pdf') as doc:
-        # Whitespace-normalised: a probe that wraps onto two lines of the PDF
-        # contains a newline there, not the space the segment text has.
+        # Whitespace-normalised: a probe wrapping onto two PDF lines holds a newline, not a space.
         pages_text = [' '.join(page.get_text().split()) for page in doc]
 
     result: dict[str, int] = {}
@@ -77,8 +79,7 @@ def assign_pages(segments: list[dict], docx_bytes: bytes) -> dict[str, int]:
         if not text:
             continue
         needle = text[:_PROBE_LEN]
-        # Document order should track non-decreasing page number — search
-        # forward from the last match, never backward.
+        # Document order tracks non-decreasing page number: search forward only.
         for p in range(page_idx, len(pages_text)):
             if needle in pages_text[p]:
                 page_idx = p

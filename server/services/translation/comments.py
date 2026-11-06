@@ -29,7 +29,7 @@ _XML_DECL = b"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
 _XML_DECL_FIXED = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 
 
-def _serialize(root) -> bytes:
+def _serialize(root: Any) -> bytes:
     """Serialize an XML tree with a double-quoted XML declaration.
 
     :param root: lxml element to serialize.
@@ -86,7 +86,7 @@ def _build_comments_xml(comments: list[dict[str, Any]], existing_xml: bytes | No
 
 
 def _add_all_comment_markers(
-    doc_root, comments: list[dict[str, Any]], comment_ids: dict[str, int],
+    doc_root: Any, comments: list[dict[str, Any]], comment_ids: dict[str, int],
     xml_choice_paths: dict[str, list],
 ) -> int:
     """Wrap each comment's target paragraph in comment range markers and a reference run.

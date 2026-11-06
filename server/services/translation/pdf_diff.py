@@ -4,13 +4,17 @@ original with red highlights over pixel-level changes.
 from __future__ import annotations
 
 import io
+from typing import Any
 
 from PIL import Image, ImageChops, ImageOps
 
 
-def _import_fitz():
-    """PyMuPDF version-compat import (module was renamed pymupdf -> fitz alias
-    in >=1.24)."""
+def _import_fitz() -> Any:
+    """Import PyMuPDF under either of its module names.
+
+    :return: the PyMuPDF module.
+    :raises ImportError: when PyMuPDF is not installed.
+    """
     try:
         import pymupdf as fitz  # PyMuPDF >= 1.24
         return fitz
@@ -30,8 +34,15 @@ _DIFF_THRESHOLD = 25  # grayscale delta above which a pixel counts as "changed"
 _HIGHLIGHT_RGB = (220, 38, 38)
 
 
-def _render_page_from_doc(fitz_module, doc, page_num: int, zoom: float) -> Image.Image | None:
-    """1-indexed; None if page_num is out of range for this already-open doc."""
+def _render_page_from_doc(fitz_module: Any, doc: Any, page_num: int, zoom: float) -> Image.Image | None:
+    """Render one page of an open PDF.
+
+    :param fitz_module: the PyMuPDF module.
+    :param doc: open PyMuPDF document.
+    :param page_num: 1-indexed page number.
+    :param zoom: scale factor of the rendering.
+    :return: RGB image, or None when page_num is out of range.
+    """
     if page_num < 1 or page_num > doc.page_count:
         return None
     page = doc[page_num - 1]
@@ -39,9 +50,15 @@ def _render_page_from_doc(fitz_module, doc, page_num: int, zoom: float) -> Image
     return Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
 
 
-def _render_page(fitz_module, pdf_bytes: bytes, page_num: int, zoom: float):
-    """Returns (PIL.Image | None, total_page_count). None if page_num is out
-    of range (1-indexed)."""
+def _render_page(fitz_module: Any, pdf_bytes: bytes, page_num: int, zoom: float) -> tuple[Image.Image | None, int]:
+    """Render one page of a PDF given as bytes.
+
+    :param fitz_module: the PyMuPDF module.
+    :param pdf_bytes: the PDF file bytes.
+    :param page_num: 1-indexed page number.
+    :param zoom: scale factor of the rendering.
+    :return: (RGB image or None when page_num is out of range, total page count).
+    """
     doc = fitz_module.open(stream=pdf_bytes, filetype='pdf')
     try:
         return _render_page_from_doc(fitz_module, doc, page_num, zoom), doc.page_count
@@ -50,12 +67,20 @@ def _render_page(fitz_module, pdf_bytes: bytes, page_num: int, zoom: float):
 
 
 def _pad_to_match(a: Image.Image, b: Image.Image) -> tuple[Image.Image, Image.Image]:
-    """Pad both images (white background) to their shared max dimensions,
-    rather than resize/distort — page sizes should match (rebuild preserves
-    layout) but aren't guaranteed to in every edge case."""
+    """Pad two images with a white background to their shared maximum size, without resizing.
+
+    :param a: first image.
+    :param b: second image.
+    :return: the two padded images.
+    """
     w, h = max(a.width, b.width), max(a.height, b.height)
 
     def _pad(img: Image.Image) -> Image.Image:
+        """Pad one image to the enclosing canvas size.
+
+        :param img: image to pad.
+        :return: the image itself when it already has the canvas size, otherwise a padded copy.
+        """
         if img.size == (w, h):
             return img
         canvas = Image.new('RGB', (w, h), 'white')
@@ -66,8 +91,12 @@ def _pad_to_match(a: Image.Image, b: Image.Image) -> tuple[Image.Image, Image.Im
 
 
 def _diff_mask(before_img: Image.Image, after_img: Image.Image) -> tuple[Image.Image, Image.Image, Image.Image]:
-    """Returns (padded_before, padded_after, mask) — mask is 'L' mode,
-    255=changed/0=unchanged, thresholded grayscale delta."""
+    """Compute the grayscale difference mask of two page images.
+
+    :param before_img: image of the original page.
+    :param after_img: image of the translated page.
+    :return: (padded before, padded after, mask) where the mask is an "L" image, 255 for changed pixels and 0 otherwise.
+    """
     before_img, after_img = _pad_to_match(before_img, after_img)
     gray_before = ImageOps.grayscale(before_img)
     gray_after = ImageOps.grayscale(after_img)
@@ -77,7 +106,12 @@ def _diff_mask(before_img: Image.Image, after_img: Image.Image) -> tuple[Image.I
 
 
 def _composite_diff(before_img: Image.Image, after_img: Image.Image) -> Image.Image:
-    """Grayscale BEFORE with red pixel-level highlights wherever AFTER differs."""
+    """Draw the original page in grayscale with red highlights wherever the other page differs.
+
+    :param before_img: image of the original page.
+    :param after_img: image of the translated page.
+    :return: the composite RGB image.
+    """
     before_img, _after_img, mask = _diff_mask(before_img, after_img)
     out = ImageOps.grayscale(before_img).convert('RGB')
     highlight = Image.new('RGB', out.size, _HIGHLIGHT_RGB)
@@ -89,14 +123,10 @@ _CHANGE_CELL_MIN_FRAC = 0.06  # fraction of sampled cell pixels that must differ
 
 
 def _detect_change_regions(mask: Image.Image) -> list[tuple[float, float, float, float]]:
-    """Groups changed pixels into bounding boxes, resolution-independent
-    (fractions of image width/height, 0..1) so the frontend can scale to
-    whatever size it renders the image at.
+    """Group changed pixels into bounding boxes by connected components on a coarse grid.
 
-    No scipy/opencv dependency: downsamples to a coarse grid (a full page is
-    only ~dozens of cells across) and does a plain BFS connected-component
-    pass over that grid — cheap and accurate enough for "jump to this
-    change," which doesn't need pixel-perfect region edges.
+    :param mask: "L" difference mask, 255 for changed pixels.
+    :return: (x0, y0, x1, y1) boxes as fractions of the image width and height, in reading order.
     """
     w, h = mask.size
     cols = max(1, w // _CHANGE_CELL_PX)
@@ -145,10 +175,13 @@ def _detect_change_regions(mask: Image.Image) -> list[tuple[float, float, float,
 def get_all_page_changes(
     pdf_before: bytes, pdf_after: bytes, zoom: float = 1.5,
 ) -> list[dict]:
-    """Change regions across every page, for cross-page "next/prev change"
-    navigation. Returns [{'page': N, 'bbox': [x0, y0, x1, y1]}, ...] in
-    reading order (page order, then top-to-bottom within a page). Opens
-    both PDFs once rather than reopening per page."""
+    """List the change regions of every page, for cross-page next/previous navigation.
+
+    :param pdf_before: original PDF bytes.
+    :param pdf_after: translated PDF bytes.
+    :param zoom: scale factor of the rendering.
+    :return: [{"page": N, "bbox": [x0, y0, x1, y1]}, ...] in reading order, over the pages both PDFs have.
+    """
     fitz = _import_fitz()
     doc_before = fitz.open(stream=pdf_before, filetype='pdf')
     doc_after = fitz.open(stream=pdf_after, filetype='pdf')
@@ -170,10 +203,13 @@ def get_all_page_changes(
 def render_page_diff(
     pdf_before: bytes, pdf_after: bytes, page_num: int, zoom: float = 1.5,
 ) -> tuple[bytes | None, int]:
-    """Grayscale rendering of the BEFORE page with red pixel-level highlights
-    wherever the AFTER page differs. Returns (png_bytes, total_pages) —
-    total_pages is min(before, after) page counts; png_bytes is None if
-    page_num is out of range for either document (caller should 404).
+    """Render one page of the original with red highlights where the translated page differs.
+
+    :param pdf_before: original PDF bytes.
+    :param pdf_after: translated PDF bytes.
+    :param page_num: 1-indexed page number.
+    :param zoom: scale factor of the rendering.
+    :return: (PNG bytes or None when page_num is out of range for either document, the smaller of the two page counts).
     """
     fitz = _import_fitz()
     before_img, before_pages = _render_page(fitz, pdf_before, page_num, zoom)

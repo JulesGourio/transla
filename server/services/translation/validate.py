@@ -22,14 +22,21 @@ Exit code: 0 if all checks pass, 1 if any fail.
 
 from __future__ import annotations
 import json
+import logging
 import re
 import sys
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+logger = logging.getLogger(__name__)
 
 def check_zip_integrity(path: str) -> list[str]:
+    """Check that every entry of the archive is readable.
+
+    :param path: path of the .docx.
+    :return: error messages; empty when the archive is sound.
+    """
     errors = []
     try:
         with zipfile.ZipFile(path) as z:
@@ -42,6 +49,11 @@ def check_zip_integrity(path: str) -> list[str]:
 
 
 def check_xml_validity(path: str) -> list[str]:
+    """Check that every .xml and .rels part parses.
+
+    :param path: path of the .docx.
+    :return: error messages; empty when all parts parse.
+    """
     errors = []
     with zipfile.ZipFile(path) as z:
         for name in z.namelist():
@@ -54,7 +66,11 @@ def check_xml_validity(path: str) -> list[str]:
 
 
 def check_namespace_integrity(path: str) -> list[str]:
-    """Check that mc:Ignorable references only declared prefixes."""
+    """Check that mc:Ignorable only references declared prefixes.
+
+    :param path: path of the .docx.
+    :return: error messages; empty when all prefixes are declared.
+    """
     errors = []
     MC_IGN_RE = re.compile(rb'mc:Ignorable="([^"]+)"')
     XMLNS_PREFIX_RE = re.compile(rb'xmlns:([A-Za-z0-9_]+)="')
@@ -67,7 +83,7 @@ def check_namespace_integrity(path: str) -> list[str]:
             if not mc_m:
                 continue
             prefixes = mc_m.group(1).decode().split()
-            # Collect ALL xmlns declarations in the entire file (not just root)
+            # Declarations may sit on inner elements, so the whole file is scanned.
             declared = set(m.group(1).decode()
                            for m in XMLNS_PREFIX_RE.finditer(data))
             missing = [p for p in prefixes if p not in declared]
@@ -80,7 +96,11 @@ def check_namespace_integrity(path: str) -> list[str]:
 
 
 def check_auto_prefixes(path: str) -> list[str]:
-    """Check for ns0:/ns1:/ns2: auto-generated namespace prefixes."""
+    """Check for auto-generated ns0:/ns1: namespace prefixes in the XML parts.
+
+    :param path: path of the .docx.
+    :return: error messages; empty when none is found.
+    """
     errors = []
     AUTO_NS_RE = re.compile(rb'<ns\d+:')
     with zipfile.ZipFile(path) as z:
@@ -98,7 +118,11 @@ def check_auto_prefixes(path: str) -> list[str]:
 
 
 def check_content_types(path: str) -> list[str]:
-    """Verify [Content_Types].xml references parts that exist."""
+    """Check that every part referenced by [Content_Types].xml exists.
+
+    :param path: path of the .docx.
+    :return: error messages; empty when consistent.
+    """
     errors = []
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
@@ -106,7 +130,6 @@ def check_content_types(path: str) -> list[str]:
             errors.append("Missing [Content_Types].xml")
             return errors
         ct = z.read("[Content_Types].xml").decode("utf-8", errors="replace")
-        # Find all Override PartName references
         for m in re.finditer(r'PartName="/([^"]+)"', ct):
             part = m.group(1)
             if part not in names:
@@ -117,19 +140,18 @@ def check_content_types(path: str) -> list[str]:
 
 
 def check_segment_fidelity(path: str, extract_json: str) -> list[str]:
-    """Compare segment count and IDs against a reference extract.
+    """Compare the segment ids and count of a file against a reference extract.
 
-    word/comments.xml is excluded: when review comments were injected into
-    this rebuild (comments.py's inject_comments), extraction now finds those
-    new comment paragraphs too (extract.py's NOTE_WRAPPER_TAGS) — that's
-    intentional growth from THIS rebuild, not the lost/duplicated body
-    content this check exists to catch.
+    word/comments.xml is excluded, because injected review comments legitimately add segments there.
+
+    :param path: path of the .docx to check.
+    :param extract_json: path of the reference extract.json.
+    :return: error messages; empty when the segments match.
     """
     errors = []
     try:
         from .extract import main as extract_main
         import tempfile
-        # Extract from the file being validated
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             tmp = f.name
         extract_main(path, tmp)
@@ -158,12 +180,14 @@ def check_segment_fidelity(path: str, extract_json: str) -> list[str]:
 
 
 def check_byte_identity(path: str, original: str) -> list[str]:
-    """For parts that should be untouched, verify byte identity."""
+    """Check that parts holding no user text are byte-identical to the original.
+
+    :param path: path of the rebuilt .docx.
+    :param original: path of the original .docx.
+    :return: error messages; empty when the parts are identical.
+    """
     errors = []
-    # Parts that should never change (no user text). word/endnotes.xml and
-    # word/footnotes.xml are deliberately NOT here: extract.py now translates
-    # their paragraphs, so they legitimately change on any rebuild that
-    # actually has footnote/endnote content.
+    # Parts holding no user text. Footnotes and endnotes are excluded: their paragraphs are translated.
     IMMUTABLE = {"word/styles.xml", "word/settings.xml", "word/fontTable.xml",
                  "word/webSettings.xml", "word/numbering.xml", "word/theme/theme1.xml"}
     with zipfile.ZipFile(path) as z1, zipfile.ZipFile(original) as z2:
@@ -181,8 +205,14 @@ def check_byte_identity(path: str, original: str) -> list[str]:
 
 
 def check_residual_source_language(path: str, source_lang: str) -> list[str]:
-    """Check for segments still in the source language that should have been
-    translated. Uses Cyrillic detection for BG, diacritic patterns for CS."""
+    """Report segments still in the source language after translation.
+
+    Bulgarian is confirmed by Cyrillic presence; Czech, German and Spanish by characters unique to the language; other languages by the detector with a high threshold.
+
+    :param path: path of the rebuilt .docx.
+    :param source_lang: source language code.
+    :return: error messages listing up to ten residual segments; empty when none remain.
+    """
     errors = []
     try:
         from .extract import main as extract_main
@@ -194,12 +224,10 @@ def check_residual_source_language(path: str, source_lang: str) -> list[str]:
         data = json.loads(Path(tmp).read_text(encoding="utf-8"))
         Path(tmp).unlink()
 
-        # Language-specific unique characters for confirming residual text.
-        # The generic detector can confuse CS↔FR (shared diacritics éáí).
-        # We require source-language-UNIQUE characters as confirmation.
+        # The generic detector confuses CS and FR (shared diacritics), so residual text needs source-unique characters.
         UNIQUE_CHARS = {
-            "cs": set("řůěŘŮĚ"),       # Czech-only among supported set
-            "bg": None,                  # Use Cyrillic block instead
+            "cs": set("řůěŘŮĚ"),
+            "bg": None,  # Cyrillic block test instead
             "de": set("ßÄÖÜäöü"),
             "es": set("ñÑ¿¡"),
         }
@@ -212,17 +240,14 @@ def check_residual_source_language(path: str, source_lang: str) -> list[str]:
                 continue
 
             if source_lang == "bg":
-                # Cyrillic presence is definitive
                 cyr = sum(1 for c in text if "\u0400" <= c <= "\u04ff")
                 if cyr > 3:
                     residual.append(s)
             elif unique_chars:
-                # For Latin-script source languages, require unique chars
-                # to avoid false positives (FR flagged as CS, etc.)
+                # Unique characters avoid false positives such as FR flagged as CS.
                 if any(c in unique_chars for c in text):
                     residual.append(s)
             else:
-                # Fallback: use detector with high threshold
                 lang, conf = detect_language(text)
                 if lang == source_lang and conf > 0.85:
                     residual.append(s)
@@ -241,6 +266,11 @@ def check_residual_source_language(path: str, source_lang: str) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    """Run the structural checks from the command line and log the report.
+
+    :param argv: command-line arguments, program name first: --job <dir>, or <file.docx> with optional --original <orig.docx>, --extract <extract.json> and --source-lang XX.
+    :return: 0 when all checks pass, 1 otherwise.
+    """
     from job_utils import parse_job_flag, JobPaths, update_manifest
     job_dir, remaining = parse_job_flag(argv[1:])
     if job_dir:
@@ -251,8 +281,8 @@ def main(argv: list[str]) -> int:
         source_lang = jp.source_lang
     else:
         if len(argv) < 2:
-            print("Usage: python validate.py <file.docx> [--original <orig.docx>] "
-                  "[--extract <extract.json>] [--source-lang XX]")
+            logger.error("Usage: python validate.py <file.docx> [--original <orig.docx>] "
+                         "[--extract <extract.json>] [--source-lang XX]")
             return 1
         path = argv[1]
         original = None
@@ -290,16 +320,15 @@ def main(argv: list[str]) -> int:
     total_errors = 0
     for name, errors in checks:
         status = "PASS" if not errors else "FAIL"
-        print(f"  [{status}] {name}")
+        logger.info("[%s] %s", status, name)
         for e in errors:
-            print(f"         {e}")
+            logger.info("       %s", e)
         total_errors += len(errors)
 
-    print()
     if total_errors == 0:
-        print("ALL CHECKS PASSED")
+        logger.info("ALL CHECKS PASSED")
     else:
-        print(f"FAILED: {total_errors} error(s) found")
+        logger.info("FAILED: %d error(s) found", total_errors)
 
     if job_dir:
         update_manifest(job_dir, status="validated")
@@ -308,4 +337,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sys.exit(main(sys.argv))

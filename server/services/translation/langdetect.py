@@ -22,7 +22,9 @@ import os
 import re
 import unicodedata
 from collections import Counter
+from collections.abc import Iterable
 from functools import lru_cache
+from typing import Any
 
 from .glossary_io import DntMatcher
 
@@ -234,7 +236,7 @@ _FASTTEXT_MODEL_PATH = os.path.join(
 
 
 @lru_cache(maxsize=1)
-def _fasttext_model():
+def _fasttext_model() -> Any:
     """Load the fastText lid.176 model once.
 
     :return: the model, or None when the package or the model file is unavailable.
@@ -247,7 +249,7 @@ def _fasttext_model():
         return None
 
 
-def _fasttext_scores(text: str, langs) -> dict[str, float] | None:
+def _fasttext_scores(text: str, langs: Iterable[str]) -> dict[str, float] | None:
     """Compute fastText lid.176 probabilities renormalized over a subset of languages.
 
     Renormalizing over the in-scope languages sends noise mass to out-of-scope languages instead of a wrong in-scope one. The text is lower-cased first because the model misreads ALL-CAPS accented titles.
@@ -291,7 +293,7 @@ def _fasttext_restricted(text: str) -> tuple[str, float] | None:
 
 
 def detect_language_constrained(
-    text: str, candidates, default_lang: str | None = None, source_lang: str | None = None,
+    text: str, candidates: Iterable[str], default_lang: str | None = None, source_lang: str | None = None,
 ) -> tuple[str, float]:
     """Ensemble detector restricted to a small candidate set; the primary detector for mono segments.
 

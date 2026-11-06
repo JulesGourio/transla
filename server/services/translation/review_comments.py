@@ -1,19 +1,10 @@
-"""Generate Word review-comment specs from a job's own already-computed
-data — ported from the POC's tools/gen_review.py, minus its hardcoded
-Czech/French terminology dictionary (tied to the vocabulary of two specific
-pilot documents, not generalizable to arbitrary language pairs; Phase 1's
-job-driven glossary candidates — server/services/translation/glossary_extract.py —
-cover "flag notable terminology" going forward instead).
+"""Generate Word review-comment specs from a job's already-computed data.
 
-Every category here reuses a signal the pipeline already computes rather
-than re-deriving it: conflict_detail (audit.py's assess_pair), the
-translated/failed/kept_* category buckets the Segments panel already shows
-(server/routers/translate.py::_segment_category), the bilingual-inline
-pattern_type, and check_fit()'s flagged list (with its per-location-type
-thresholds — more nuanced than the POC's one flat 140% txbx-only check).
+Every category reuses a signal the pipeline already computes: conflict_detail
+(audit.py's assess_pair), the segment category buckets shown in the Segments
+panel, the bilingual-inline pattern_type, and the fit check's flagged list.
 
-See comments.py for how these specs get anchored into the .docx as real
-Word comments.
+comments.py anchors these specs into the .docx as real Word comments.
 """
 from __future__ import annotations
 
@@ -24,8 +15,7 @@ _LOCATION_LABELS = {
     'table': 'Table cell', 'body_direct': 'Body text', 'sdt': 'Content control',
 }
 
-# Same first-match-per-segment priority order the POC used (one comment per
-# segment to keep the Review pane readable, not one per issue detected).
+# Lowest value wins: one comment per segment keeps the Review pane readable.
 _TYPE_PRIORITY = {'header': 0, 'untranslated': 1, 'conflict': 2, 'overflow': 3, 'layout': 4}
 
 _INLINE_PATTERNS = ('bilingual_inline_slash', 'bilingual_inline_concat', 'bilingual_inline_charsplit')
@@ -36,14 +26,13 @@ _AUTHOR = 'Translation review'
 def generate_review_comments(
     segments: list[dict[str, Any]], flagged_fit: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """segments: one dict per segment with at least seg_id, pattern_type,
-    conflict_flag, conflict_detail, category (the same bucket
-    _segment_category assigns: translated/kept_dnt/kept_numeric/
-    kept_other_language/needs_review). flagged_fit: check_fit()'s return value.
+    """Generate Word review-comment specs from a job's already-computed data.
 
-    Returns [{seg_id, author, type, comment}, ...], deduplicated to one
-    comment per segment (ties broken by the priority above), ready for
-    comments.inject_comments().
+    At most one comment per segment, the highest-priority type winning.
+
+    :param segments: one dict per segment with at least seg_id, pattern_type, conflict_flag, conflict_detail and category (translated, kept_dnt, kept_numeric, kept_other_language or needs_review).
+    :param flagged_fit: flagged overflow entries as returned by the fit check.
+    :return: [{seg_id, author, type, comment}, ...] ready for comments.inject_comments.
     """
     comments: list[dict[str, str]] = []
 

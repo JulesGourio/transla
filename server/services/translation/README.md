@@ -132,7 +132,7 @@ merges with comments already in the document. A specification whose segment is u
   paragraphs and `segment_fidelity` compares ids.
 - The stable parts of a document (styles, settings, theme, media, ...) are never rewritten.
 - Supported languages are `en fr es de cs bg pt ar`. Adding one touches `langdetect.LANG_PROFILES`, `SUPPORTED_LANGS`, the
-  language name tables in `routers/translate.py` and `glossary_verify.py`, the glossary columns, and the client's language
+  language name tables of the translate router and `glossary_verify.py`, the glossary columns, and the client's language
   lists.
 
 ## See also

@@ -32,14 +32,17 @@ Usage:
 
 from __future__ import annotations
 import json
+import logging
 import re
 import sys
 import zipfile
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 
+logger = logging.getLogger(__name__)
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -56,10 +59,8 @@ XMLNS_DEFAULT_RE = re.compile(rb'xmlns="([^"]+)"')
 ROOT_TAG_RE = re.compile(rb'<(?!\?)\S[^>]*>', re.DOTALL)  # first element after decl
 
 
-# Pre-register the full conventional Word/OOXML namespace prefix set so that
-# ElementTree never has to invent ns10/ns12 placeholders. Even namespaces
-# declared deep in the doc (e.g. on inline <pic:pic> elements) get the
-# conventional prefix this way.
+# Conventional Word/OOXML prefixes, registered so ElementTree never invents ns10-style
+# placeholders, even for namespaces declared deep in the document.
 _OOXML_NS_PRESET = {
     "w":      "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "mc":     "http://schemas.openxmlformats.org/markup-compatibility/2006",
@@ -104,19 +105,18 @@ _OOXML_NS_PRESET = {
 
 
 def extract_original_root_tag(xml_bytes: bytes) -> bytes:
-    """Extract the complete opening tag of the root element from XML bytes.
+    """Extract the complete opening tag of the root element.
 
-    The original root tag includes ALL namespace declarations (even unused
-    ones) and attributes like mc:Ignorable. We preserve this exactly so
-    Word doesn't reject the file for undeclared namespace prefixes.
+    The tag carries every namespace declaration, even unused ones, and attributes such as mc:Ignorable; it is preserved exactly so Word does not reject undeclared prefixes.
+
+    :param xml_bytes: XML part bytes.
+    :return: the root opening tag; empty bytes when none is found.
     """
-    # Skip past XML declaration if present
     search_start = 0
     if xml_bytes.lstrip()[:5] == b"<?xml":
         end_decl = xml_bytes.find(b"?>")
         if end_decl != -1:
             search_start = end_decl + 2
-    # Find the root element's opening tag (first < that isn't <?)
     m = ROOT_TAG_RE.search(xml_bytes, search_start)
     if m:
         return m.group(0)
@@ -124,21 +124,16 @@ def extract_original_root_tag(xml_bytes: bytes) -> bytes:
 
 
 def merge_root_tags(new_xml: bytes, orig_root_tag: bytes) -> bytes:
-    """Replace the ET-serialized root element opening tag with one that
-    merges namespace declarations from BOTH the original and the new.
+    """Replace the root opening tag of re-serialized XML with the original tag extended by the namespace declarations only the new tag has.
 
-    - The original root tag has all the declarations Word requires (including
-      "unused" prefixes referenced by mc:Ignorable).
-    - The new root tag may have ADDITIONAL declarations for namespaces that
-      were originally declared locally on inner elements (e.g. pic:, a14:)
-      but which ET hoisted to the root.
+    The new tag may hold declarations hoisted from inner elements (e.g. pic:, a14:).
 
-    We merge: start with original root tag, then inject any xmlns:xxx
-    declarations from the new tag that aren't already present.
+    :param new_xml: XML bytes serialized by ElementTree.
+    :param orig_root_tag: root opening tag of the original XML; empty means no merge.
+    :return: the XML bytes with the merged root tag.
     """
     if not orig_root_tag:
         return new_xml
-    # Find the new root tag
     search_start = 0
     if new_xml.lstrip()[:5] == b"<?xml":
         end_decl = new_xml.find(b"?>")
@@ -149,20 +144,17 @@ def merge_root_tags(new_xml: bytes, orig_root_tag: bytes) -> bytes:
         return new_xml
     new_root_tag = m.group(0)
 
-    # Collect xmlns declarations from both tags
     orig_ns = {m2.group(1): m2.group(0)
                for m2 in XMLNS_DECL_RE.finditer(orig_root_tag)}
     new_ns = {m2.group(1): m2.group(0)
               for m2 in XMLNS_DECL_RE.finditer(new_root_tag)}
 
-    # Find xmlns declarations in the new tag that the original doesn't have
     extra_decls = []
     for prefix, full_decl in new_ns.items():
         if prefix not in orig_ns:
             extra_decls.append(b" " + full_decl)
 
     if extra_decls:
-        # Insert extra declarations just before the closing ">" of orig tag
         if orig_root_tag.endswith(b"/>"):
             insert_pos = len(orig_root_tag) - 2
             suffix = b"/>"
@@ -177,25 +169,21 @@ def merge_root_tags(new_xml: bytes, orig_root_tag: bytes) -> bytes:
 
 
 def register_namespaces_from_xml(xml_bytes: bytes) -> dict[str, str]:
-    """Pre-register every conventional OOXML namespace prefix, then scan the
-    ENTIRE XML for any additional xmlns declarations (which may be declared
-    on inner elements rather than the root). This ensures ET never invents
-    ns10/ns12 placeholder prefixes during serialization.
+    """Register every conventional OOXML prefix and any other xmlns declaration of the XML with ElementTree, so serialization never invents ns10-style prefixes.
 
-    Returns the merged {prefix: uri} dict."""
+    :param xml_bytes: XML part bytes; inner declarations and the default namespace (within the first 8 KiB) are included.
+    :return: merged {prefix: uri} mapping; the default namespace has the empty prefix.
+    """
     ns_map = dict(_OOXML_NS_PRESET)
-    # Pre-register the conventional prefixes
     for prefix, uri in _OOXML_NS_PRESET.items():
         ET.register_namespace(prefix, uri)
-    # Scan FULL bytes for any additional xmlns declarations
     for m in XMLNS_DECL_RE.finditer(xml_bytes):
         prefix = m.group(1).decode("ascii")
         uri = m.group(2).decode("utf-8")
         if ns_map.get(prefix) == uri:
-            continue  # already registered with same URI
+            continue
         ns_map[prefix] = uri
         ET.register_namespace(prefix, uri)
-    # Default namespace
     m = XMLNS_DEFAULT_RE.search(xml_bytes[:8192])
     if m:
         uri = m.group(1).decode("utf-8")
@@ -209,16 +197,18 @@ def register_namespaces_from_xml(xml_bytes: bytes) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def walk_path(root: ET.Element, path: list) -> ET.Element | None:
-    """Walk a positional_path [[tag, idx], ...] from root. Returns the
-    target element, or None if the path is invalid."""
+    """Follow a positional path from the root.
+
+    :param root: root element.
+    :param path: [[tag, child index], ...] as produced by extract.py.
+    :return: the target element, or None when the path does not match the tree.
+    """
     cur = root
     for tag, idx in path:
         children = list(cur)
         if idx >= len(children):
             return None
         if children[idx].tag != tag:
-            # Path drift - fall back to scanning for matching tag at this index
-            # Should not happen if the source doc hasn't changed.
             return None
         cur = children[idx]
     return cur
@@ -229,12 +219,19 @@ def walk_path(root: ET.Element, path: list) -> ET.Element | None:
 # ---------------------------------------------------------------------------
 
 def get_runs(p: ET.Element) -> list[ET.Element]:
-    """Return all <w:r> elements in document order under p, NOT descending
-    into drawings/text-boxes (those are separate segments)."""
+    """List the <w:r> elements under a paragraph in document order, without descending into drawings and text boxes (separate segments).
+
+    :param p: <w:p> element.
+    :return: run elements.
+    """
     out = []
     SKIP = {W + "drawing", MC + "AlternateContent", W + "pict"}
 
-    def walk(elem):
+    def walk(elem: ET.Element) -> None:
+        """Collect the runs below an element into the enclosing list.
+
+        :param elem: element whose descendants are visited.
+        """
         for child in elem:
             if child.tag in SKIP:
                 continue
@@ -246,17 +243,32 @@ def get_runs(p: ET.Element) -> list[ET.Element]:
 
 
 def get_t_elements(run: ET.Element) -> list[ET.Element]:
-    """Return all <w:t> elements directly inside a run (preserves order)."""
+    """List the <w:t> elements directly inside a run, in order.
+
+    :param run: <w:r> element.
+    :return: text elements.
+    """
     return [t for t in run if t.tag == W + "t"]
 
 
-def _set_t(t, text: str) -> None:
+def _set_t(t: ET.Element, text: str) -> None:
+    """Set the text of a <w:t> element, adding xml:space="preserve" when the text has outer whitespace.
+
+    :param t: <w:t> element.
+    :param text: new text.
+    """
     t.text = text
     if text != text.strip():
         t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 
 
-def _new_t(ref, text: str):
+def _new_t(ref: ET.Element, text: str) -> ET.Element:
+    """Create a <w:t> element with the given text.
+
+    :param ref: element whose factory builds the new element.
+    :param text: text of the new element.
+    :return: the new element.
+    """
     t = ref.makeelement(W + "t", {})
     _set_t(t, text)
     return t
@@ -264,17 +276,19 @@ def _new_t(ref, text: str):
 
 _SEP_TAGS = {W + "tab": "\t", W + "br": "\n"}
 
-# Not allowed in XML 1.0: lxml refuses them, so one stray control character in
-# a model answer crashed the whole rebuild.
+# Not allowed in XML 1.0; lxml refuses them.
 _XML_ILLEGAL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 def _write_runs_text(runs: list, new_text: str) -> bool:
-    """Write new_text into runs, honouring its \\t/\\n as the runs' own
-    <w:tab/>/<w:br/> (extract.py reads them as those characters). Dumping it
-    all into the first <w:t> left a literal \\n/\\t there AND every original
-    break/tab bunched after it — a blank line per break, doubled tabs, i.e.
-    extra pages on a translation no longer than its source."""
+    """Write a text into runs, turning its tab and newline characters into the runs' own <w:tab/> and <w:br/>.
+
+    Control characters illegal in XML 1.0 are stripped. When the text has the same separators in the same order as the runs, each piece goes into the slot between the original separators; otherwise the sequence is rebuilt in the first text run, reusing the original separators of each kind.
+
+    :param runs: <w:r> elements to write into.
+    :param new_text: text to write.
+    :return: False when the runs hold no <w:t> element, otherwise True.
+    """
     new_text = _XML_ILLEGAL_RE.sub("", new_text)
     items = []  # (run, elem, kind) in document order; kind 't', '\t' or '\n'
     for r in runs:
@@ -293,8 +307,6 @@ def _write_runs_text(runs: list, new_text: str) -> bool:
     old_seps = [(r, c, k) for r, c, k in items if k != "t"]
 
     if [k for _, _, k in old_seps] == new_seps:
-        # Same breaks/tabs in the same order: each text piece goes into the
-        # slot between the original separators.
         slots: list[list] = [[] for _ in texts]
         i = 0
         for _, c, k in items:
@@ -316,9 +328,7 @@ def _write_runs_text(runs: list, new_text: str) -> bool:
                     r.insert(list(r).index(sep) + 1, _new_t(sep, text))
         return True
 
-    # Different structure (the LLM merged/split lines): rebuild the sequence
-    # in the first text run, reusing original separators of the same kind
-    # in order (keeps a page break's w:type); unused ones stay where they are.
+    # The LLM merged or split lines: reusing original separators keeps a page break's w:type.
     first_r, first_t = next((r, c) for r, c, k in items if k == "t")
     pools = {"\t": [(r, c) for r, c, k in old_seps if k == "\t"],
              "\n": [(r, c) for r, c, k in old_seps if k == "\n"]}
@@ -341,8 +351,12 @@ def _write_runs_text(runs: list, new_text: str) -> bool:
 
 
 def replace_uniform(p: ET.Element, new_text: str) -> bool:
-    """Strategy: write the whole text over all runs (see _write_runs_text).
-    Used when all runs share the same formatting (~80-90% of segments)."""
+    """Write the whole text over all runs of a paragraph; used when the runs share one formatting.
+
+    :param p: <w:p> element.
+    :param new_text: replacement text.
+    :return: True when the text was written.
+    """
     runs = get_runs(p)
     if not runs:
         return False
@@ -351,11 +365,12 @@ def replace_uniform(p: ET.Element, new_text: str) -> bool:
 
 def replace_bilingual_format_split(p: ET.Element, new_text: str,
                                    primary_fmt: str) -> bool:
-    """For a paragraph that holds both languages distinguished by formatting:
-    replace only the <w:t> elements whose parent run's fmt_hash matches
-    primary_fmt. Other runs (the kept-language) are left untouched.
+    """Replace only the runs whose format hash matches the primary side of a bilingual paragraph; the kept-language runs stay untouched.
 
-    new_text is the translated PRIMARY-side text only.
+    :param p: <w:p> element.
+    :param new_text: translated text of the primary side only.
+    :param primary_fmt: format hash of the runs to replace.
+    :return: True when the text was written, False when no run matches.
     """
     runs = get_runs(p)
     if not runs:
@@ -366,11 +381,12 @@ def replace_bilingual_format_split(p: ET.Element, new_text: str,
 
 def replace_slash_split(p: ET.Element, new_left: str,
                         original_left_text: str) -> bool:
-    """For 'X / Y' segments: replace only the left half (everything before
-    the '/') with new_left. The '/' separator and right half are preserved.
+    """Replace the part before the "/" of an "X / Y" paragraph; the separator and the right half are preserved.
 
-    Implementation: collect all <w:t> text in order, find the '/' position,
-    replace only the characters before it with new_left.
+    :param p: <w:p> element.
+    :param new_left: replacement for the left half.
+    :param original_left_text: original left half (unused).
+    :return: True when the text was written, False when the paragraph has no text or no "/".
     """
     runs = get_runs(p)
     all_ts = []
@@ -382,24 +398,18 @@ def replace_slash_split(p: ET.Element, new_left: str,
     if "/" not in full:
         return False
     slash_idx = full.index("/")
-    # New full text: new_left + " / " + everything after the original "/"
-    # We preserve the original separator/spacing characters around the slash
-    # by keeping characters from the original "/" position onward.
-    after_slash = full[slash_idx:]  # starts with "/"
-    # Strip trailing whitespace from new_left and prepend a single space
-    # before "/" if the original had one.
+    after_slash = full[slash_idx:]
     sep_prefix = " " if (slash_idx > 0 and full[slash_idx - 1] == " ") else ""
     new_full = new_left.rstrip() + sep_prefix + after_slash
-    # Distribute new_full across the existing <w:t> elements proportionally
     return _redistribute_across_ts(all_ts, new_full)
 
 
 def replace_proportional(p: ET.Element, new_text: str) -> bool:
-    """Mixed formatting fallback: distribute new_text across all <w:t>
-    elements proportionally to original character lengths.
+    """Distribute a text across all <w:t> elements proportionally to their original lengths; approximate, format boundaries may shift mid-word.
 
-    This is approximate - format-span boundaries may shift mid-word. Used
-    only when no better strategy applies.
+    :param p: <w:p> element.
+    :param new_text: replacement text.
+    :return: True when the text was written.
     """
     runs = get_runs(p)
     all_ts = []
@@ -411,7 +421,12 @@ def replace_proportional(p: ET.Element, new_text: str) -> bool:
 
 
 def _redistribute_across_ts(ts: list[ET.Element], new_text: str) -> bool:
-    """Distribute new_text across ts proportionally to original lengths."""
+    """Distribute a text across <w:t> elements proportionally to their original lengths; the last one takes the remainder.
+
+    :param ts: <w:t> elements.
+    :param new_text: text to distribute.
+    :return: False when ts is empty, otherwise True.
+    """
     if not ts:
         return False
     if len(ts) == 1:
@@ -437,7 +452,11 @@ def _redistribute_across_ts(ts: list[ET.Element], new_text: str) -> bool:
 
 
 def _fmt_hash(rPr: ET.Element | None) -> str:
-    """Mirror of extract.fmt_hash - keep in sync with extract.py."""
+    """Hash the formatting properties of a run; identical to extract.fmt_hash and must stay in sync with it.
+
+    :param rPr: the run's <w:rPr> element; None for an unformatted run.
+    :return: the fingerprint; "" when rPr is None.
+    """
     if rPr is None:
         return ""
     interesting = {"sz", "szCs", "b", "bCs", "i", "iCs", "u", "color",
@@ -461,8 +480,19 @@ def apply_translations(root: ET.Element, segments_for_part: list[dict],
                        choice_paths: dict, fallback_paths: dict,
                        fmt_signatures: dict, inline_splits: dict,
                        pattern_types: dict) -> int:
-    """Apply translations to one parsed XML tree. Returns count of
-    successfully applied translations."""
+    """Apply translations to one parsed ElementTree XML part.
+
+    Both the mc:Choice and the mc:Fallback copy of a paragraph are updated identically.
+
+    :param root: root element of the part.
+    :param segments_for_part: translation segments of this part.
+    :param choice_paths: seg_id to positional path of the paragraph.
+    :param fallback_paths: seg_id to positional path of the mc:Fallback twin; None entries are skipped.
+    :param fmt_signatures: seg_id to dominant format hash.
+    :param inline_splits: seg_id to inline split info; None when the segment has none.
+    :param pattern_types: seg_id to pattern type; missing means "mono".
+    :return: number of segments processed, excluding those marked keep_as_is.
+    """
     applied = 0
     for seg in segments_for_part:
         seg_id = seg["seg_id"]
@@ -475,7 +505,6 @@ def apply_translations(root: ET.Element, segments_for_part: list[dict],
         inline_split = inline_splits.get(seg_id)
         pattern = pattern_types.get(seg_id, "mono")
 
-        # Both copies (mc:Choice + mc:Fallback) must be updated identically
         for path in (ch_path, fb_path):
             if not path:
                 continue
@@ -485,11 +514,9 @@ def apply_translations(root: ET.Element, segments_for_part: list[dict],
             if pattern == "bilingual_inline_slash" and inline_split:
                 replace_slash_split(target, new_text, seg["original_text"])
             elif pattern == "bilingual_inline_concat" and inline_split:
-                # Only replace runs whose fmt matches the primary side
                 primary_fmt = inline_split.get("fmt_a", fmt_sig)
                 replace_bilingual_format_split(target, new_text, primary_fmt)
             else:
-                # Default: uniform replacement
                 replace_uniform(target, new_text)
         applied += 1
     return applied
@@ -498,14 +525,24 @@ def apply_translations(root: ET.Element, segments_for_part: list[dict],
 # ---------------------------------------------------------------------------
 # lxml-based translation application
 # ---------------------------------------------------------------------------
-# Mirrors apply_translations() but works on lxml etree Elements.
-# lxml elements have the same .tag, .text, .attrib, list(elem), findall()
-# API as stdlib ET, so the path-walking and run-replacement logic is reused.
+# lxml elements share the ET API, so path-walking and run replacement are reused.
 
-def apply_translations_lxml(root, segments_for_part, choice_paths,
-                            fallback_paths, fmt_signatures, inline_splits,
-                            pattern_types) -> int:
-    """Apply translations to an lxml tree. Returns count applied."""
+def apply_translations_lxml(root: Any, segments_for_part: list[dict], choice_paths: dict,
+                            fallback_paths: dict, fmt_signatures: dict, inline_splits: dict,
+                            pattern_types: dict) -> int:
+    """Apply translations to one parsed lxml XML part.
+
+    A format-split bilingual segment (span_translated) carries only the source-side span and is spliced into the runs of that side; no fallback to uniform replacement, so an unmatched format leaves the paragraph untouched. Every other segment carries the full replacement text.
+
+    :param root: root element of the part.
+    :param segments_for_part: translation segments of this part.
+    :param choice_paths: seg_id to positional path of the paragraph.
+    :param fallback_paths: seg_id to positional path of the mc:Fallback twin; None entries are skipped.
+    :param fmt_signatures: seg_id to dominant format hash.
+    :param inline_splits: seg_id to inline split info; None when the segment has none.
+    :param pattern_types: seg_id to pattern type (unused here).
+    :return: number of segments processed, excluding those marked keep_as_is.
+    """
     applied = 0
     for seg in segments_for_part:
         seg_id = seg["seg_id"]
@@ -525,20 +562,10 @@ def apply_translations_lxml(root, segments_for_part, choice_paths,
             if target is None:
                 continue
             if inline_split and inline_split.get("span_translated"):
-                # Format-split bilingual segment: translated_text holds ONLY
-                # the source-side span (marked span_translated by the
-                # translation stage) — splice it into the runs whose
-                # formatting matches that side; the kept-language runs
-                # survive verbatim. replace_uniform here would wipe the kept
-                # side. No uniform fallback on failure for the same reason —
-                # an unmatched fmt leaves the paragraph untouched.
+                # Uniform replacement would wipe the kept-language side.
                 replace_bilingual_format_split(
                     target, new_text, inline_split.get("source_fmt") or fmt_sig)
             else:
-                # Whole-segment and char/slash-split translations carry the
-                # full replacement text (kept-language portion included, the
-                # translation stage composed it), so uniform replacement is
-                # correct for them.
                 replace_uniform(target, new_text)
         applied += 1
     return applied
@@ -551,8 +578,14 @@ def apply_translations_lxml(root, segments_for_part, choice_paths,
 def rebuild_docx(src_docx: str, out_docx: str,
                  translations_by_part: dict[str, list[dict]] | None = None,
                  metadata: dict | None = None) -> None:
-    """If translations_by_part is None or empty, this is a pure round-trip
-    (parse and re-serialize every part with no changes)."""
+    """Write a translated .docx from a source .docx and translations; every unmodified zip entry is copied byte-for-byte.
+
+    :param src_docx: path of the source .docx.
+    :param out_docx: path of the output .docx; parent directories are created.
+    :param translations_by_part: part name to translation segments; None or empty means a pure round-trip that re-serializes every text-bearing part.
+    :param metadata: choice_paths, fallback_paths, fmt_signatures, inline_splits and pattern_types, as built by load_translation_with_metadata.
+    :raises RuntimeError: when lxml is not installed.
+    """
     src = Path(src_docx)
     out = Path(out_docx)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -560,12 +593,10 @@ def rebuild_docx(src_docx: str, out_docx: str,
 
     with zipfile.ZipFile(src, "r") as zin:
         names = zin.namelist()
-        # Collect new bytes for parts we'll modify
         new_bytes: dict[str, bytes] = {}
         modified_parts = (set(translations_by_part.keys())
                           if translations_by_part else set())
-        # During round-trip mode we still re-serialize every text-bearing part
-        # to test fidelity; pick them up from the zip namelist.
+        # A round-trip re-serializes every text-bearing part to test fidelity.
         if not translations_by_part:
             modified_parts = {n for n in names
                               if n.startswith("word/") and n.endswith(".xml")
@@ -579,15 +610,8 @@ def rebuild_docx(src_docx: str, out_docx: str,
                 continue
             xml_bytes = zin.read(part)
 
-            # Use lxml for parsing + serialization. Unlike stdlib
-            # ElementTree, lxml preserves:
-            #   - All namespace declarations (even "unused" ones)
-            #   - Attribute ordering
-            #   - Whitespace in self-closing tags
-            #   - xml:space attributes
-            # This is critical because Word rejects files where
-            # mc:Ignorable references undeclared prefixes, and subtle
-            # whitespace/attribute changes can cause layout shifts.
+            # lxml keeps every namespace declaration, attribute order and xml:space, unlike
+            # ElementTree; Word rejects files whose mc:Ignorable names undeclared prefixes.
             try:
                 from lxml import etree as lxml_etree
                 parser = lxml_etree.XMLParser(
@@ -612,18 +636,15 @@ def rebuild_docx(src_docx: str, out_docx: str,
                     lxml_root, segs, ch_paths, fb_paths, fmt_sigs,
                     inline_splits, pattern_types,
                 )
-                print(f"  {part}: applied {applied}/{len(segs)} translations")
+                logger.info("%s: applied %d/%d translations", part, applied, len(segs))
 
-            # lxml serialization preserves the original structure faithfully.
             raw = lxml_etree.tostring(
                 lxml_root,
                 xml_declaration=True,
                 encoding="UTF-8",
                 standalone=True,
             )
-            # lxml cosmetic fixes to match Word's expected XML form:
-            #   - double quotes in declaration (lxml uses single)
-            #   - CRLF after declaration (lxml uses LF)
+            # Match Word's XML form: double quotes in the declaration, CRLF after it.
             raw = raw.replace(
                 b"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>",
                 b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -632,8 +653,6 @@ def rebuild_docx(src_docx: str, out_docx: str,
             raw = raw.replace(b'?>\n<', b'?>\r\n<', 1)
             new_bytes[part] = raw
 
-        # Write output zip: copy unchanged entries byte-for-byte, substitute
-        # modified parts.
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
             for name in names:
                 if name in new_bytes:
@@ -641,7 +660,7 @@ def rebuild_docx(src_docx: str, out_docx: str,
                 else:
                     zout.writestr(name, zin.read(name))
 
-    print(f"Wrote {out}")
+    logger.info("Wrote %s", out)
 
 
 # ---------------------------------------------------------------------------
@@ -651,9 +670,13 @@ def rebuild_docx(src_docx: str, out_docx: str,
 def load_translation_with_metadata(translation_path: str,
                                    extract_path: str,
                                    audit_path: str) -> tuple[dict, dict]:
-    """Load translation.json and cross-reference with extract.json + audit.json
-    to obtain: per-segment xml paths, fmt signatures, inline_split info, and
-    pattern types. Returns (translations_by_part, metadata)."""
+    """Load translation.json and cross-reference extract.json and audit.json.
+
+    :param translation_path: path of translation.json.
+    :param extract_path: path of extract.json.
+    :param audit_path: path of audit.json.
+    :return: (translation segments by part name, metadata dict with per-segment xml paths, format signatures, inline splits and pattern types).
+    """
     tr = json.loads(Path(translation_path).read_text(encoding="utf-8"))
     ex = json.loads(Path(extract_path).read_text(encoding="utf-8"))
     au = json.loads(Path(audit_path).read_text(encoding="utf-8"))
@@ -689,11 +712,16 @@ def load_translation_with_metadata(translation_path: str,
 # CLI
 # ---------------------------------------------------------------------------
 
-def usage():
-    print(__doc__.strip().splitlines()[-3].strip())  # last "Usage:" line
+def usage() -> None:
+    """Log the usage line of the module docstring."""
+    logger.info(__doc__.strip().splitlines()[-3].strip())
 
 
 def main(argv: list[str]) -> None:
+    """Command-line entry point: rebuild from a job directory, round-trip a file, or rebuild from explicit paths.
+
+    :param argv: command-line arguments, program name first: --job <dir>, or --roundtrip <input.docx> <output.docx>, or <input.docx> <translation.json> <output.docx>.
+    """
     from job_utils import parse_job_flag, JobPaths, update_manifest
     job_dir, remaining = parse_job_flag(argv[1:])
     if job_dir:
@@ -708,17 +736,16 @@ def main(argv: list[str]) -> None:
 
     if len(argv) >= 2 and argv[1] == "--roundtrip":
         if len(argv) != 4:
-            print("Usage: python rebuild.py --roundtrip <input.docx> <output.docx>")
+            logger.error("Usage: python rebuild.py --roundtrip <input.docx> <output.docx>")
             sys.exit(1)
         rebuild_docx(argv[2], argv[3])
         return
     if len(argv) != 4:
-        print("Usage: python rebuild.py <input.docx> <translation.json> <output.docx>")
-        print("       python rebuild.py --roundtrip <input.docx> <output.docx>")
+        logger.error("Usage: python rebuild.py <input.docx> <translation.json> <output.docx>")
+        logger.error("       python rebuild.py --roundtrip <input.docx> <output.docx>")
         sys.exit(1)
     src_docx, translation_json, out_docx = argv[1], argv[2], argv[3]
-    # Derive extract/audit paths from translation.json's filename. Convention:
-    #   <stem>.translation.json  pairs with  <stem>.extract.json + <stem>.audit.json
+    # <stem>.translation.json pairs with <stem>.extract.json and <stem>.audit.json.
     tr_path = Path(translation_json)
     stem = tr_path.stem.replace(".translation", "")
     reports_dir = tr_path.parent
@@ -731,4 +758,5 @@ def main(argv: list[str]) -> None:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main(sys.argv)
