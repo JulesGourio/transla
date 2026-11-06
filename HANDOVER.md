@@ -31,7 +31,7 @@ cours reprend là où elle s'était arrêtée.
 
 | Env | Cible du bundle | Workspace | Catalogue.schéma | Profil CLI | Service principal des jobs |
 |---|---|---|---|---|---|
-| DEV | `dev` | `dbc-c623749d-731b` | `dev_proj.latlang` | à définir | non défini |
+| DEV | `dev` | `dbc-c623749d-731b` | `dev_proj.latlang` | `DEV` | non défini (pas de job en DEV) |
 | UAT | `latlang-uat` | `dbc-3a17bfce-9e88` | `uat_proj.latlang` | `UAT` | `3e5cd4e5-f765-4760-b974-ee7715258b39` (job-runner-sa-uat) |
 | PROD | `latlang-prod` | **non renseigné** dans `databricks.yml` | `prod_proj.latlang` | `qualibot-prod` | non défini |
 

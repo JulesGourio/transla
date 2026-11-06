@@ -20,7 +20,7 @@ Parent: [utils](../README.md).
 .\utils\deploy\deploy_latlang.ps1 -AppEnv uat -Infra       # bundle deploy first
 ```
 
-`-AppEnv` is `uat` (bundle target `latlang-uat`, CLI profile `UAT`) or `prod` (`latlang-prod`, profile `qualibot-prod`). The
+`-AppEnv` is `dev` (bundle target `dev`, CLI profile `DEV`), `uat` (bundle target `latlang-uat`, CLI profile `UAT`) or `prod` (`latlang-prod`, profile `qualibot-prod`). The
 app is named `latlang` in both.
 
 Steps:

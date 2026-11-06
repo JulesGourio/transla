@@ -16,12 +16,13 @@ $ErrorActionPreference = 'Stop'
 # that's exactly how a stale test database name could leak into a real-uat
 # deploy.
 $Targets = @{
+    dev  = @{ Target = 'dev';          AppName = 'latlang'; Profile = 'DEV' }
     uat  = @{ Target = 'latlang-uat';  AppName = 'latlang'; Profile = 'UAT' }
     prod = @{ Target = 'latlang-prod'; AppName = 'latlang'; Profile = 'qualibot-prod' }
 }
 
 if (-not $Targets.ContainsKey($AppEnv)) {
-    Write-Host "Unknown environment '$AppEnv'. Use: uat | prod" -ForegroundColor Red
+    Write-Host "Unknown environment '$AppEnv'. Use: dev | uat | prod" -ForegroundColor Red
     exit 1
 }
 
